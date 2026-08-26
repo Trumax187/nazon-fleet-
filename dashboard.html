@@ -1,0 +1,142 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>NAZON Fleet Tracking</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:Arial, sans-serif; }
+    #bar { background:#0b3d91; color:#fff; padding:14px 18px; font-size:20px; font-weight:bold;
+           display:flex; justify-content:space-between; align-items:center; }
+    #bar span { font-weight:normal; font-size:14px; opacity:.85; }
+    #alertCount { background:#e74c3c; font-size:13px; padding:3px 10px; border-radius:12px;
+                  display:none; }
+    #wrap { display:flex; height: calc(100vh - 52px); }
+    #panel { width:300px; background:#f4f6fb; border-right:1px solid #dbe0ea;
+             overflow-y:auto; padding:12px; }
+    #panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:1px;
+                color:#0b3d91; margin:4px 4px 12px; }
+    .card { background:#fff; border:1px solid #e2e6ef; border-radius:8px;
+            padding:10px 12px; margin-bottom:10px; cursor:pointer; }
+    .card.alert { border-color:#e74c3c; background:#fff5f4; }
+    .card .plate { font-weight:bold; color:#0b3d91; font-size:15px; }
+    .card .meta { font-size:12px; color:#555; margin-top:4px; }
+    .speed.over { color:#e74c3c; font-weight:bold; }
+    .tag { font-size:11px; font-weight:bold; color:#fff; padding:1px 6px;
+           border-radius:4px; margin-left:6px; }
+    .tag.speed { background:#e74c3c; }
+    .tag.fuel { background:#c0392b; }
+    .dot { display:inline-block; width:9px; height:9px; border-radius:50%;
+           margin-right:6px; background:#2ecc71; }
+    .fuelwrap { height:8px; background:#e6e9f0; border-radius:5px; margin-top:6px;
+                overflow:hidden; }
+    .fuelbar { height:100%; background:#2ecc71; }
+    .fuelbar.low { background:#e67e22; }
+    .fuelbar.crit { background:#e74c3c; }
+    #map { flex:1; }
+    .plateLbl { background:#0b3d91; color:#fff; padding:2px 6px; border-radius:4px;
+                font-size:12px; font-weight:bold; white-space:nowrap; }
+    .plateLbl.over { background:#e74c3c; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <div>NAZON &nbsp;<span>Live Fleet Tracking</span></div>
+    <div id="alertCount"></div>
+  </div>
+  <div id="wrap">
+    <div id="panel">
+      <h2>Vehicles</h2>
+      <div id="list"></div>
+    </div>
+    <div id="map"></div>
+  </div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map("map").setView([-15.3982, 28.3100], 13);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "© OpenStreetMap"
+    }).addTo(map);
+
+    const markers = {};
+    const trails = {};
+    const colors = ["#0b3d91", "#8e44ad", "#16a085", "#d35400", "#2c3e50"];
+    let colorIdx = 0;
+    const plateColor = {};
+    function colorFor(plate){ if(!plateColor[plate]) plateColor[plate]=colors[colorIdx++%colors.length]; return plateColor[plate]; }
+
+    function ago(iso){ const s=Math.floor((Date.now()-new Date(iso+"Z").getTime())/1000); return s<60? s+"s ago": Math.floor(s/60)+"m ago"; }
+
+    function icon(over){ return L.divIcon({className:"",
+      html:'<div style="width:16px;height:16px;border-radius:50%;border:2px solid #fff;background:'+(over?'#e74c3c':'#0b3d91')+';box-shadow:0 0 4px rgba(0,0,0,.4)"></div>',
+      iconSize:[16,16], iconAnchor:[8,8]}); }
+
+    async function drawTrail(plate){
+      try{
+        const res=await fetch("http://127.0.0.1:8000/trail/"+plate);
+        const d=await res.json();
+        if(d.points && d.points.length>1){
+          if(trails[plate]) trails[plate].setLatLngs(d.points);
+          else trails[plate]=L.polyline(d.points,{color:colorFor(plate),weight:3,opacity:0.7}).addTo(map);
+        }
+      }catch(e){ console.log(e); }
+    }
+
+    async function refresh(){
+      try{
+        const res=await fetch("http://127.0.0.1:8000/fleet");
+        const data=await res.json();
+        const limit=data.speed_limit;
+        const fleet=data.vehicles;
+        const list=document.getElementById("list");
+        list.innerHTML="";
+        let alerts=0;
+
+        fleet.forEach(v=>{
+          const pos=[v.lat,v.lon];
+          const over=v.speeding;
+          const theft=v.fuel_drop;
+          if(over) alerts++;
+          if(theft) alerts++;
+
+          if(!markers[v.plate]){
+            markers[v.plate]=L.marker(pos,{icon:icon(over)}).addTo(map)
+              .bindTooltip(v.plate,{permanent:true,direction:"top",className:"plateLbl"+(over?" over":"")});
+          } else {
+            markers[v.plate].setLatLng(pos).setIcon(icon(over));
+            markers[v.plate].bindTooltip(v.plate,{permanent:true,direction:"top",className:"plateLbl"+(over?" over":"")});
+          }
+
+          drawTrail(v.plate);
+
+          let fclass="fuelbar";
+          if(v.fuel<20) fclass+=" crit";
+          else if(v.fuel<40) fclass+=" low";
+
+          const card=document.createElement("div");
+          card.className="card"+((over||theft)?" alert":"");
+          card.innerHTML=
+            '<div class="plate">'+v.plate+
+              (over?'<span class="tag speed">SPEEDING</span>':'')+
+              (theft?'<span class="tag fuel">FUEL DROP</span>':'')+'</div>'+
+            '<div class="meta"><span class="dot"></span>Active · '+ago(v.ts)+'</div>'+
+            '<div class="meta">Speed: <span class="speed '+(over?'over':'')+'">'+Math.round(v.speed)+' km/h</span> (limit '+limit+')</div>'+
+            '<div class="meta">Fuel: '+v.fuel.toFixed(0)+'%</div>'+
+            '<div class="fuelwrap"><div class="'+fclass+'" style="width:'+v.fuel+'%"></div></div>';
+          card.onclick=()=>map.setView(pos,15);
+          list.appendChild(card);
+        });
+
+        const badge=document.getElementById("alertCount");
+        if(alerts>0){ badge.style.display="inline-block"; badge.textContent="⚠ "+alerts+" alert"+(alerts>1?"s":""); }
+        else badge.style.display="none";
+      }catch(e){ console.log(e); }
+    }
+
+    setInterval(refresh,2000);
+    refresh();
+  </script>
+</body>
+</html>
