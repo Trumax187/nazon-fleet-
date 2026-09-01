@@ -90,7 +90,7 @@ def init():
         username TEXT PRIMARY KEY, password TEXT, kind TEXT,
         display_name TEXT, is_admin INTEGER DEFAULT 0, must_change INTEGER DEFAULT 0)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS vehicles (
-        id INTEGER PRIMARY KEY, plate TEXT UNIQUE, owner TEXT)""")
+        id INTEGER PRIMARY KEY, plate TEXT UNIQUE, owner TEXT, device_key TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS locations (
         id INTEGER PRIMARY KEY, plate TEXT, lat REAL, lon REAL,
         speed REAL DEFAULT 0, fuel REAL DEFAULT 0, ts TEXT)""")
@@ -135,6 +135,7 @@ class Ping(BaseModel):
     lon: float
     speed: float = 0
     fuel: float = 0
+    device_key: str = ""
 
 
 class Zone(BaseModel):
@@ -231,8 +232,13 @@ def create_account(req: NewAccount, authorization: str = Header(None)):
 @app.post("/track")
 def track(p: Ping):
     conn = db()
-    conn.execute("INSERT OR IGNORE INTO vehicles (plate, owner) VALUES (?, ?)",
-                 (p.plate, "unknown"))
+    v = conn.execute("SELECT device_key FROM vehicles WHERE plate=?", (p.plate,)).fetchone()
+    if v is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Unknown vehicle. Register it first.")
+    if not p.device_key or not hmac.compare_digest(p.device_key, v["device_key"] or ""):
+        conn.close()
+        raise HTTPException(status_code=401, detail="Invalid device key")
     conn.execute("""INSERT INTO locations (plate, lat, lon, speed, fuel, ts)
                     VALUES (?, ?, ?, ?, ?, ?)""",
                  (p.plate, p.lat, p.lon, p.speed, p.fuel,
@@ -242,13 +248,69 @@ def track(p: Ping):
     return {"saved": True, "plate": p.plate}
 
 
+class RegisterVehicle(BaseModel):
+    plate: str
+    owner: str = ""     # admin may set; owners get their own
+
+
+@app.post("/vehicles")
+def register_vehicle(req: RegisterVehicle, authorization: str = Header(None)):
+    username = require_owner(authorization)
+    conn = db()
+    me = conn.execute("SELECT is_admin FROM owners WHERE username=?", (username,)).fetchone()
+    is_admin = me is not None and me["is_admin"]
+    owner = req.owner if (is_admin and req.owner) else username
+    # confirm target owner exists
+    if conn.execute("SELECT username FROM owners WHERE username=?", (owner,)).fetchone() is None:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Owner account does not exist")
+    existing = conn.execute("SELECT plate FROM vehicles WHERE plate=?", (req.plate,)).fetchone()
+    key = secrets.token_hex(16)
+    if existing:
+        conn.execute("UPDATE vehicles SET owner=?, device_key=? WHERE plate=?",
+                     (owner, key, req.plate))
+    else:
+        conn.execute("INSERT INTO vehicles (plate, owner, device_key) VALUES (?, ?, ?)",
+                     (req.plate, owner, key))
+    conn.commit()
+    conn.close()
+    return {"plate": req.plate, "owner": owner, "device_key": key}
+
+
+@app.get("/my-vehicles")
+def my_vehicles(authorization: str = Header(None)):
+    username = require_owner(authorization)
+    conn = db()
+    me = conn.execute("SELECT is_admin FROM owners WHERE username=?", (username,)).fetchone()
+    is_admin = me is not None and me["is_admin"]
+    if is_admin:
+        rows = conn.execute("SELECT plate, owner, device_key FROM vehicles").fetchall()
+    else:
+        rows = conn.execute("SELECT plate, owner, device_key FROM vehicles WHERE owner=?",
+                            (username,)).fetchall()
+    conn.close()
+    return [{"plate": r["plate"], "owner": r["owner"], "device_key": r["device_key"]} for r in rows]
+
+
 class SosReq(BaseModel):
     plate: str
 
 
+def owns_vehicle(conn, username, plate):
+    me = conn.execute("SELECT is_admin FROM owners WHERE username=?", (username,)).fetchone()
+    if me is not None and me["is_admin"]:
+        return True
+    v = conn.execute("SELECT owner FROM vehicles WHERE plate=?", (plate,)).fetchone()
+    return v is not None and v["owner"] == username
+
+
 @app.post("/sos")
-def sos_trigger(s: SosReq):
+def sos_trigger(s: SosReq, authorization: str = Header(None)):
+    username = require_owner(authorization)
     conn = db()
+    if not owns_vehicle(conn, username, s.plate):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Not your vehicle")
     conn.execute("""INSERT INTO sos (plate, active, ts) VALUES (?, 1, ?)
                     ON CONFLICT(plate) DO UPDATE SET active=1, ts=excluded.ts""",
                  (s.plate, datetime.utcnow().isoformat()))
@@ -258,8 +320,12 @@ def sos_trigger(s: SosReq):
 
 
 @app.post("/sos/clear")
-def sos_clear(s: SosReq):
+def sos_clear(s: SosReq, authorization: str = Header(None)):
+    username = require_owner(authorization)
     conn = db()
+    if not owns_vehicle(conn, username, s.plate):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Not your vehicle")
     conn.execute("UPDATE sos SET active=0 WHERE plate=?", (s.plate,))
     conn.commit()
     conn.close()
@@ -267,7 +333,8 @@ def sos_clear(s: SosReq):
 
 
 @app.get("/zones")
-def get_zones():
+def get_zones(authorization: str = Header(None)):
+    require_owner(authorization)
     conn = db()
     rows = conn.execute("SELECT id, name, kind, lat, lon, radius_m FROM zones").fetchall()
     conn.close()
@@ -346,8 +413,12 @@ def fleet(authorization: str = Header(None)):
 
 
 @app.get("/trail/{plate}")
-def trail(plate: str):
+def trail(plate: str, authorization: str = Header(None)):
+    username = require_owner(authorization)
     conn = db()
+    if not owns_vehicle(conn, username, plate):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Not your vehicle")
     rows = conn.execute("""SELECT lat, lon FROM locations WHERE plate=?
                            ORDER BY id DESC LIMIT 40""", (plate,)).fetchall()
     conn.close()
@@ -634,18 +705,38 @@ MOBILE_HTML = """<!DOCTYPE html>
     .head { padding:18px; font-size:22px; font-weight:bold; }
     .head span { display:block; font-size:13px; opacity:.85; font-weight:normal; }
     .card { background:#fff; color:#222; margin:16px; border-radius:12px; padding:20px; }
-    #btn { font-size:20px; font-weight:bold; color:#fff; background:#2ecc71; border:none;
-           border-radius:12px; padding:18px 20px; width:100%; margin-top:10px; }
+    input, select { width:100%; padding:11px; margin:6px 0; border:1px solid #ccc; border-radius:8px; font-size:15px; box-sizing:border-box; }
+    #btn, .gobtn { font-size:18px; font-weight:bold; color:#fff; background:#2ecc71; border:none;
+           border-radius:12px; padding:16px 20px; width:100%; margin-top:10px; }
     #btn.stop { background:#e74c3c; }
+    .gobtn { background:#0b3d91; }
     .row { font-size:15px; margin:8px 0; }
     .big { font-size:34px; font-weight:bold; color:#0b3d91; }
     .muted { color:#777; font-size:13px; }
     #status { margin-top:10px; font-size:14px; }
+    .err { color:#e74c3c; font-size:13px; margin-top:6px; }
   </style>
 </head>
 <body>
-  <div class="head">NAZON<span>Phone Live Tracker - AMEN</span></div>
-  <div class="card">
+  <div class="head">NAZON<span>Phone Live Tracker</span></div>
+
+  <div id="loginCard" class="card">
+    <div class="row muted">Sign in to track your vehicle</div>
+    <input id="u" placeholder="Username" />
+    <input id="p" type="password" placeholder="Password" />
+    <button class="gobtn" id="loginBtn">Sign in</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+
+  <div id="pickCard" class="card" style="display:none;">
+    <div class="row muted">Choose the vehicle this phone is in</div>
+    <select id="vehSel"></select>
+    <button class="gobtn" id="pickBtn">Use this vehicle</button>
+    <div class="err" id="pickErr"></div>
+  </div>
+
+  <div id="trackCard" class="card" style="display:none;">
+    <div class="row muted">Tracking as <b id="plateLbl"></b></div>
     <div class="row muted">Your current speed</div>
     <div class="big"><span id="speed">0</span> km/h</div>
     <div class="row">Lat: <span id="lat">-</span></div>
@@ -653,52 +744,76 @@ MOBILE_HTML = """<!DOCTYPE html>
     <div id="status" class="muted">Tap Start and allow location.</div>
     <button id="btn">Start tracking</button>
   </div>
-  <script>
-    const PLATE = "AMEN";
-    let watchId = null;
-    const btn = document.getElementById("btn");
 
+  <script>
+    let TOKEN = null, PLATE = null, DEVICE_KEY = null, watchId = null;
+
+    function show(id){ ["loginCard","pickCard","trackCard"].forEach(x=>{ document.getElementById(x).style.display = (x===id?"block":"none"); }); }
     function setStatus(t){ document.getElementById("status").textContent = t; }
 
-    async function send(lat, lon, speedKmh){
+    async function login(){
+      const u=document.getElementById("u").value.trim(), p=document.getElementById("p").value;
+      const err=document.getElementById("loginErr"); err.textContent="";
       try{
-        await fetch("/track", {
-          method:"POST",
-          headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({plate:PLATE, lat:lat, lon:lon, speed:speedKmh, fuel:100})
-        });
+        const r=await fetch("/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u,password:p})});
+        if(!r.ok){ err.textContent="Invalid username or password"; return; }
+        TOKEN=(await r.json()).token;
+        loadVehicles();
+      }catch(e){ err.textContent="Could not reach server"; }
+    }
+
+    async function loadVehicles(){
+      const r=await fetch("/my-vehicles",{headers:{"Authorization":"Bearer "+TOKEN}});
+      const list=await r.json();
+      const sel=document.getElementById("vehSel");
+      if(!list.length){ document.getElementById("pickErr").textContent="No vehicles registered to this account yet."; }
+      sel.innerHTML="";
+      list.forEach(v=>{ const o=document.createElement("option"); o.value=JSON.stringify({plate:v.plate,key:v.device_key}); o.textContent=v.plate+"  ("+v.owner+")"; sel.appendChild(o); });
+      show("pickCard");
+    }
+
+    function pick(){
+      const sel=document.getElementById("vehSel");
+      if(!sel.value){ document.getElementById("pickErr").textContent="No vehicle to select."; return; }
+      const v=JSON.parse(sel.value);
+      PLATE=v.plate; DEVICE_KEY=v.key;
+      document.getElementById("plateLbl").textContent=PLATE;
+      show("trackCard");
+    }
+
+    async function send(lat, lon, kmh){
+      try{
+        const r=await fetch("/track",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({plate:PLATE, lat:lat, lon:lon, speed:kmh, fuel:100, device_key:DEVICE_KEY})});
+        if(!r.ok){ setStatus("Server rejected the update (key/vehicle problem)."); }
       }catch(e){ setStatus("Send failed - is the server reachable?"); }
     }
 
     function start(){
       if(!navigator.geolocation){ setStatus("This phone has no geolocation."); return; }
       setStatus("Getting GPS fix...");
-      watchId = navigator.geolocation.watchPosition(function(p){
-        const lat = p.coords.latitude, lon = p.coords.longitude;
-        let spd = p.coords.speed;               // metres/second, may be null
-        let kmh = (spd && spd > 0) ? Math.round(spd * 3.6) : 0;
-        document.getElementById("lat").textContent = lat.toFixed(5);
-        document.getElementById("lon").textContent = lon.toFixed(5);
-        document.getElementById("speed").textContent = kmh;
+      watchId=navigator.geolocation.watchPosition(function(pos){
+        const lat=pos.coords.latitude, lon=pos.coords.longitude;
+        let spd=pos.coords.speed; let kmh=(spd&&spd>0)?Math.round(spd*3.6):0;
+        document.getElementById("lat").textContent=lat.toFixed(5);
+        document.getElementById("lon").textContent=lon.toFixed(5);
+        document.getElementById("speed").textContent=kmh;
         setStatus("Live - sending your location");
-        send(lat, lon, kmh);
-      }, function(err){
-        setStatus("Location error: " + err.message);
-      }, { enableHighAccuracy:true, maximumAge:1000, timeout:10000 });
-      btn.textContent = "Stop tracking";
-      btn.classList.add("stop");
+        send(lat,lon,kmh);
+      }, function(err){ setStatus("Location error: "+err.message); },
+      { enableHighAccuracy:true, maximumAge:1000, timeout:10000 });
+      const b=document.getElementById("btn"); b.textContent="Stop tracking"; b.classList.add("stop");
     }
-
     function stop(){
-      if(watchId !== null){ navigator.geolocation.clearWatch(watchId); watchId = null; }
-      btn.textContent = "Start tracking";
-      btn.classList.remove("stop");
+      if(watchId!==null){ navigator.geolocation.clearWatch(watchId); watchId=null; }
+      const b=document.getElementById("btn"); b.textContent="Start tracking"; b.classList.remove("stop");
       setStatus("Stopped.");
     }
 
-    btn.addEventListener("click", function(){
-      if(watchId === null) start(); else stop();
-    });
+    document.getElementById("loginBtn").addEventListener("click", login);
+    document.getElementById("p").addEventListener("keydown", e=>{ if(e.key==="Enter") login(); });
+    document.getElementById("pickBtn").addEventListener("click", pick);
+    document.getElementById("btn").addEventListener("click", function(){ if(watchId===null) start(); else stop(); });
   </script>
 </body>
 </html>"""
