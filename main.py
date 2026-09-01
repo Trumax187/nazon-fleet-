@@ -2,7 +2,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-import sqlite3, math, hashlib, hmac, secrets, time, base64, json
+import sqlite3, math, hashlib, hmac, secrets, time, base64, json, os
 from datetime import datetime
 
 app = FastAPI(title="NAZON")
@@ -14,20 +14,66 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB = "nazon.db"
 SPEED_LIMIT = 80
 FUEL_DROP_ALERT = 6
 
-# NOTE: for a real deployment this secret must be kept out of source control
-# and set from an environment variable. Fine for local demo use.
-SECRET_KEY = "nazon-demo-secret-change-me"
+# Secret comes from the environment in production; falls back to a demo value locally.
+SECRET_KEY = os.environ.get("NAZON_SECRET", "nazon-demo-secret-change-me")
 TOKEN_HOURS = 12
+
+# If DATABASE_URL is set (on Render), use PostgreSQL; otherwise use a local SQLite file.
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+USE_PG = DATABASE_URL.startswith("postgres")
+
+if USE_PG:
+    import psycopg2
+    import psycopg2.extras
+    # Render sometimes provides a "postgres://" URL; psycopg2 wants "postgresql://"
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+
+class DBWrapper:
+    """Thin wrapper so the rest of the code can use one style:
+       conn.execute("... ? ...", (args,)).fetchone()/.fetchall()
+       works on both SQLite and PostgreSQL."""
+    def __init__(self):
+        if USE_PG:
+            self.conn = psycopg2.connect(DATABASE_URL)
+        else:
+            self.conn = sqlite3.connect("nazon.db")
+            self.conn.row_factory = sqlite3.Row
+
+    def execute(self, sql, params=()):
+        if USE_PG:
+            sql = sql.replace("?", "%s")
+            cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        else:
+            cur = self.conn.cursor()
+        cur.execute(sql, params)
+        return _Result(cur)
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+
+class _Result:
+    def __init__(self, cur):
+        self.cur = cur
+
+    def fetchone(self):
+        row = self.cur.fetchone()
+        return row
+
+    def fetchall(self):
+        return self.cur.fetchall()
 
 
 def db():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return DBWrapper()
 
 
 def hash_password(password, salt=None):
@@ -86,17 +132,17 @@ def require_owner(authorization):
 
 def init():
     conn = db()
+    pk = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY"
     conn.execute("""CREATE TABLE IF NOT EXISTS owners (
         username TEXT PRIMARY KEY, password TEXT, kind TEXT,
         display_name TEXT, is_admin INTEGER DEFAULT 0, must_change INTEGER DEFAULT 0)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS vehicles (
-        id INTEGER PRIMARY KEY, plate TEXT UNIQUE, owner TEXT, device_key TEXT)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS locations (
-        id INTEGER PRIMARY KEY, plate TEXT, lat REAL, lon REAL,
-        speed REAL DEFAULT 0, fuel REAL DEFAULT 0, ts TEXT)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS zones (
-        id INTEGER PRIMARY KEY, name TEXT, kind TEXT,
-        lat REAL, lon REAL, radius_m REAL)""")
+    conn.execute("CREATE TABLE IF NOT EXISTS vehicles ("
+                 "id " + pk + ", plate TEXT UNIQUE, owner TEXT, device_key TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS locations ("
+                 "id " + pk + ", plate TEXT, lat REAL, lon REAL, "
+                 "speed REAL DEFAULT 0, fuel REAL DEFAULT 0, ts TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS zones ("
+                 "id " + pk + ", name TEXT, kind TEXT, lat REAL, lon REAL, radius_m REAL)")
     conn.execute("""CREATE TABLE IF NOT EXISTS sos (
         plate TEXT PRIMARY KEY, active INTEGER DEFAULT 0, ts TEXT)""")
     count = conn.execute("SELECT COUNT(*) AS c FROM zones").fetchone()["c"]
@@ -105,9 +151,9 @@ def init():
             ("Chibolya", "danger", -15.4400, 28.2720, 700),
             ("Kanyama", "danger", -15.4270, 28.2600, 900),
         ]
-        conn.executemany(
-            "INSERT INTO zones (name, kind, lat, lon, radius_m) VALUES (?, ?, ?, ?, ?)", seed)
-    # seed admin account if none exists
+        for s in seed:
+            conn.execute(
+                "INSERT INTO zones (name, kind, lat, lon, radius_m) VALUES (?, ?, ?, ?, ?)", s)
     admin = conn.execute("SELECT username FROM owners WHERE username='nazon'").fetchone()
     if admin is None:
         conn.execute(
