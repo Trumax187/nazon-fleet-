@@ -1,8 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-import sqlite3, math
+import sqlite3, math, hashlib, hmac, secrets, time, base64, json
 from datetime import datetime
 
 app = FastAPI(title="NAZON")
@@ -18,6 +18,11 @@ DB = "nazon.db"
 SPEED_LIMIT = 80
 FUEL_DROP_ALERT = 6
 
+# NOTE: for a real deployment this secret must be kept out of source control
+# and set from an environment variable. Fine for local demo use.
+SECRET_KEY = "nazon-demo-secret-change-me"
+TOKEN_HOURS = 12
+
 
 def db():
     conn = sqlite3.connect(DB)
@@ -25,8 +30,65 @@ def db():
     return conn
 
 
+def hash_password(password, salt=None):
+    if salt is None:
+        salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
+    return salt + "$" + h.hex()
+
+
+def verify_password(password, stored):
+    try:
+        salt, _ = stored.split("$", 1)
+    except ValueError:
+        return False
+    return hmac.compare_digest(hash_password(password, salt), stored)
+
+
+def make_token(username):
+    payload = {"u": username, "exp": int(time.time()) + TOKEN_HOURS * 3600}
+    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    sig = hmac.new(SECRET_KEY.encode(), body.encode(), hashlib.sha256).hexdigest()
+    return body + "." + sig
+
+
+def verify_token(token):
+    try:
+        body, sig = token.split(".", 1)
+    except (ValueError, AttributeError):
+        return None
+    expected = hmac.new(SECRET_KEY.encode(), body.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        return None
+    pad = "=" * (-len(body) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(body + pad))
+    except Exception:
+        return None
+    if payload.get("exp", 0) < int(time.time()):
+        return None
+    return payload.get("u")
+
+
+def current_owner(authorization):
+    """Extract and verify the owner from an Authorization: Bearer <token> header."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    return verify_token(authorization[7:])
+
+
+def require_owner(authorization):
+    username = current_owner(authorization)
+    if username is None:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return username
+
+
 def init():
     conn = db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS owners (
+        username TEXT PRIMARY KEY, password TEXT, kind TEXT,
+        display_name TEXT, is_admin INTEGER DEFAULT 0, must_change INTEGER DEFAULT 0)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS vehicles (
         id INTEGER PRIMARY KEY, plate TEXT UNIQUE, owner TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS locations (
@@ -45,6 +107,12 @@ def init():
         ]
         conn.executemany(
             "INSERT INTO zones (name, kind, lat, lon, radius_m) VALUES (?, ?, ?, ?, ?)", seed)
+    # seed admin account if none exists
+    admin = conn.execute("SELECT username FROM owners WHERE username='nazon'").fetchone()
+    if admin is None:
+        conn.execute(
+            "INSERT INTO owners (username, password, kind, display_name, is_admin, must_change) VALUES (?, ?, ?, ?, 1, 1)",
+            ("nazon", hash_password("nazon123"), "admin", "NAZON Admin"))
     conn.commit()
     conn.close()
 
@@ -80,6 +148,84 @@ class Zone(BaseModel):
 @app.get("/")
 def home():
     return {"system": "NAZON", "status": "online"}
+
+
+class LoginReq(BaseModel):
+    username: str
+    password: str
+
+
+class NewAccount(BaseModel):
+    username: str
+    password: str
+    kind: str = "individual"     # "company" or "individual"
+    display_name: str = ""
+
+
+class ChangePw(BaseModel):
+    new_password: str
+
+
+@app.post("/login")
+def login(req: LoginReq):
+    conn = db()
+    row = conn.execute("SELECT * FROM owners WHERE username=?", (req.username,)).fetchone()
+    conn.close()
+    if row is None or not verify_password(req.password, row["password"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return {
+        "token": make_token(row["username"]),
+        "username": row["username"],
+        "display_name": row["display_name"],
+        "is_admin": bool(row["is_admin"]),
+        "must_change": bool(row["must_change"]),
+    }
+
+
+@app.get("/whoami")
+def whoami(authorization: str = Header(None)):
+    username = require_owner(authorization)
+    conn = db()
+    row = conn.execute("SELECT username, display_name, is_admin, kind FROM owners WHERE username=?",
+                       (username,)).fetchone()
+    conn.close()
+    if row is None:
+        raise HTTPException(status_code=401, detail="Unknown account")
+    return {"username": row["username"], "display_name": row["display_name"],
+            "is_admin": bool(row["is_admin"]), "kind": row["kind"]}
+
+
+@app.post("/change-password")
+def change_password(req: ChangePw, authorization: str = Header(None)):
+    username = require_owner(authorization)
+    if len(req.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    conn = db()
+    conn.execute("UPDATE owners SET password=?, must_change=0 WHERE username=?",
+                 (hash_password(req.new_password), username))
+    conn.commit()
+    conn.close()
+    return {"changed": True}
+
+
+@app.post("/accounts")
+def create_account(req: NewAccount, authorization: str = Header(None)):
+    username = require_owner(authorization)
+    conn = db()
+    me = conn.execute("SELECT is_admin FROM owners WHERE username=?", (username,)).fetchone()
+    if me is None or not me["is_admin"]:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Only admin can create accounts")
+    exists = conn.execute("SELECT username FROM owners WHERE username=?", (req.username,)).fetchone()
+    if exists:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Username already taken")
+    conn.execute(
+        "INSERT INTO owners (username, password, kind, display_name, is_admin, must_change) VALUES (?, ?, ?, ?, 0, 1)",
+        (req.username, hash_password(req.password), req.kind, req.display_name or req.username))
+    conn.commit()
+    conn.close()
+    return {"created": req.username}
 
 
 @app.post("/track")
@@ -148,8 +294,19 @@ def delete_zone(zone_id: int):
 
 
 @app.get("/fleet")
-def fleet():
+def fleet(authorization: str = Header(None)):
+    username = require_owner(authorization)
     conn = db()
+    me = conn.execute("SELECT is_admin FROM owners WHERE username=?", (username,)).fetchone()
+    is_admin = me is not None and me["is_admin"]
+
+    # which plates may this account see?
+    if is_admin:
+        allowed = None   # all
+    else:
+        owned = conn.execute("SELECT plate FROM vehicles WHERE owner=?", (username,)).fetchall()
+        allowed = {r["plate"] for r in owned}
+
     rows = conn.execute("""
         SELECT l.plate, l.lat, l.lon, l.speed, l.fuel, l.ts
         FROM locations l
@@ -163,6 +320,8 @@ def fleet():
 
     out = []
     for r in rows:
+        if allowed is not None and r["plate"] not in allowed:
+            continue
         prev = conn.execute("""SELECT fuel FROM locations WHERE plate=?
                                ORDER BY id DESC LIMIT 1 OFFSET 1""",
                             (r["plate"],)).fetchone()
@@ -244,9 +403,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </style>
 </head>
 <body>
+  <div id="loginOverlay" style="position:fixed;inset:0;background:#0b3d91;display:flex;align-items:center;justify-content:center;z-index:9999;">
+    <div style="background:#fff;border-radius:12px;padding:26px;width:300px;font-family:Arial,sans-serif;">
+      <div style="font-size:22px;font-weight:bold;color:#0b3d91;text-align:center;">NAZON</div>
+      <div style="font-size:13px;color:#777;text-align:center;margin-bottom:16px;">Sign in to your dashboard</div>
+      <input id="lgUser" placeholder="Username" style="width:100%;padding:10px;margin:6px 0;border:1px solid #ccc;border-radius:6px;" />
+      <input id="lgPass" type="password" placeholder="Password" style="width:100%;padding:10px;margin:6px 0;border:1px solid #ccc;border-radius:6px;" />
+      <button id="lgBtn" style="width:100%;padding:11px;margin-top:8px;background:#0b3d91;color:#fff;border:none;border-radius:6px;font-weight:bold;font-size:15px;cursor:pointer;">Sign in</button>
+      <div id="lgErr" style="color:#e74c3c;font-size:13px;margin-top:8px;text-align:center;"></div>
+    </div>
+  </div>
+  <div id="pwOverlay" style="position:fixed;inset:0;background:rgba(11,61,145,.95);display:none;align-items:center;justify-content:center;z-index:9998;">
+    <div style="background:#fff;border-radius:12px;padding:26px;width:300px;font-family:Arial,sans-serif;">
+      <div style="font-size:18px;font-weight:bold;color:#0b3d91;text-align:center;">Set a new password</div>
+      <div style="font-size:13px;color:#777;text-align:center;margin-bottom:16px;">You're using a temporary password.</div>
+      <input id="pwNew" type="password" placeholder="New password (min 6)" style="width:100%;padding:10px;margin:6px 0;border:1px solid #ccc;border-radius:6px;" />
+      <button id="pwBtn" style="width:100%;padding:11px;margin-top:8px;background:#0b3d91;color:#fff;border:none;border-radius:6px;font-weight:bold;font-size:15px;cursor:pointer;">Save password</button>
+      <div id="pwErr" style="color:#e74c3c;font-size:13px;margin-top:8px;text-align:center;"></div>
+    </div>
+  </div>
   <div id="bar">
-    <div>NAZON &nbsp;<span>Live Fleet Tracking</span></div>
-    <div id="alertCount"></div>
+    <div>NAZON &nbsp;<span id="barSub">Live Fleet Tracking</span></div>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div id="alertCount"></div>
+      <button id="logoutBtn" style="display:none;background:rgba(255,255,255,.2);color:#fff;border:none;border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;">Log out</button>
+    </div>
   </div>
   <div id="sosbanner" class="sosbanner"></div>
   <div id="wrap">
@@ -262,6 +443,58 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
+    let TOKEN = localStorage.getItem("nazon_token") || null;
+    let refreshTimer = null;
+
+    function authFetch(url, opts){
+      opts = opts || {};
+      opts.headers = opts.headers || {};
+      if(TOKEN) opts.headers["Authorization"] = "Bearer " + TOKEN;
+      return fetch(url, opts);
+    }
+
+    async function doLogin(){
+      const u = document.getElementById("lgUser").value.trim();
+      const p = document.getElementById("lgPass").value;
+      const err = document.getElementById("lgErr");
+      err.textContent = "";
+      try{
+        const res = await fetch("/login", {method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({username:u, password:p})});
+        if(!res.ok){ err.textContent = "Invalid username or password"; return; }
+        const d = await res.json();
+        TOKEN = d.token;
+        localStorage.setItem("nazon_token", TOKEN);
+        document.getElementById("barSub").textContent = d.display_name || "Live Fleet Tracking";
+        document.getElementById("loginOverlay").style.display = "none";
+        document.getElementById("logoutBtn").style.display = "inline-block";
+        if(d.must_change){ document.getElementById("pwOverlay").style.display = "flex"; }
+        startApp();
+      }catch(e){ err.textContent = "Could not reach server"; }
+    }
+
+    async function doChangePw(){
+      const np = document.getElementById("pwNew").value;
+      const err = document.getElementById("pwErr");
+      if(np.length < 6){ err.textContent = "At least 6 characters"; return; }
+      const res = await authFetch("/change-password", {method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({new_password:np})});
+      if(res.ok){ document.getElementById("pwOverlay").style.display = "none"; }
+      else { err.textContent = "Could not change password"; }
+    }
+
+    function logout(){
+      TOKEN = null;
+      localStorage.removeItem("nazon_token");
+      if(refreshTimer) clearInterval(refreshTimer);
+      location.reload();
+    }
+
+    document.getElementById("lgBtn").addEventListener("click", doLogin);
+    document.getElementById("lgPass").addEventListener("keydown", e=>{ if(e.key==="Enter") doLogin(); });
+    document.getElementById("pwBtn").addEventListener("click", doChangePw);
+    document.getElementById("logoutBtn").addEventListener("click", logout);
+
     const map = L.map("map").setView([-15.4100, 28.2900], 12);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "(c) OpenStreetMap" }).addTo(map);
 
@@ -271,12 +504,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     function colorFor(p){ if(!plateColor[p]) plateColor[p]=colors[colorIdx++%colors.length]; return plateColor[p]; }
     function ago(iso){ const s=Math.floor((Date.now()-new Date(iso+"Z").getTime())/1000); return s<60? s+"s ago": Math.floor(s/60)+"m ago"; }
     function icon(state){ const c = state==="sos"?"#b30000":(state==="over"?"#e74c3c":"#0b3d91"); const sz = state==="sos"?"width:20px;height:20px;":"width:16px;height:16px;"; return L.divIcon({className:"", html:'<div style="'+sz+'border-radius:50%;border:2px solid #fff;background:'+c+';box-shadow:0 0 6px rgba(0,0,0,.5)"></div>', iconSize:[20,20], iconAnchor:[10,10]}); }
-    async function triggerSos(plate){ try{ await fetch("/sos",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
-    async function clearSos(plate){ try{ await fetch("/sos/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
+    async function triggerSos(plate){ try{ await authFetch("/sos",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
+    async function clearSos(plate){ try{ await authFetch("/sos/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
 
     async function loadZones(){
       try{
-        const res = await fetch("/zones");
+        const res = await authFetch("/zones");
         const zones = await res.json();
         zones.forEach(z => {
           const danger = z.kind === "danger";
@@ -290,7 +523,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     async function drawTrail(plate){
       try{
-        const res=await fetch("/trail/"+plate); const d=await res.json();
+        const res=await authFetch("/trail/"+plate); const d=await res.json();
         if(d.points && d.points.length>1){
           if(trails[plate]) trails[plate].setLatLngs(d.points);
           else trails[plate]=L.polyline(d.points,{color:colorFor(plate),weight:3,opacity:0.7}).addTo(map);
@@ -300,7 +533,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     async function refresh(){
       try{
-        const res=await fetch("/fleet"); const data=await res.json();
+        const res=await authFetch("/fleet");
+        if(res.status===401){ logout(); return; }
+        const data=await res.json();
         const limit=data.speed_limit, fleet=data.vehicles;
         const list=document.getElementById("list"); list.innerHTML=""; let alerts=0; let sosPlates=[];
         fleet.forEach(v=>{
@@ -354,9 +589,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       else clearSos(plate);
     });
 
-    loadZones();
-    setInterval(refresh,2000);
-    refresh();
+    let started = false;
+    function startApp(){
+      if(started) return;
+      started = true;
+      loadZones();
+      refresh();
+      refreshTimer = setInterval(refresh, 2000);
+    }
+
+    // if a token is already stored, try to use it; otherwise show login
+    if(TOKEN){
+      authFetch("/whoami").then(r=>{
+        if(r.ok){
+          return r.json().then(d=>{
+            document.getElementById("barSub").textContent = d.display_name || "Live Fleet Tracking";
+            document.getElementById("loginOverlay").style.display = "none";
+            document.getElementById("logoutBtn").style.display = "inline-block";
+            startApp();
+          });
+        } else {
+          TOKEN = null; localStorage.removeItem("nazon_token");
+        }
+      }).catch(()=>{});
+    }
   </script>
 </body>
 </html>"""
