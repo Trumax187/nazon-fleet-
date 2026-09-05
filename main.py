@@ -466,7 +466,7 @@ def trail(plate: str, authorization: str = Header(None)):
         conn.close()
         raise HTTPException(status_code=403, detail="Not your vehicle")
     rows = conn.execute("""SELECT lat, lon FROM locations WHERE plate=?
-                           ORDER BY id DESC LIMIT 40""", (plate,)).fetchall()
+                           ORDER BY id DESC LIMIT 2000""", (plate,)).fetchall()
     conn.close()
     pts = [[r["lat"], r["lon"]] for r in rows][::-1]
     return {"plate": plate, "points": pts}
