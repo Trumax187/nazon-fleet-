@@ -17,8 +17,18 @@ app.add_middleware(
 SPEED_LIMIT = 80
 FUEL_DROP_ALERT = 6
 
-# Secret comes from the environment in production; falls back to a demo value locally.
-SECRET_KEY = os.environ.get("NAZON_SECRET", "nazon-demo-secret-change-me")
+# Production = explicit NAZON_ENV=production, or a Postgres DATABASE_URL (Render sets one).
+_db_url = os.environ.get("DATABASE_URL", "")
+IS_PROD = os.environ.get("NAZON_ENV") == "production" or _db_url.startswith("postgres")
+
+# The signing secret must come from the environment. In production the app refuses to
+# start without a strong one; locally it generates a random one (logins reset on restart).
+SECRET_KEY = os.environ.get("NAZON_SECRET", "")
+if IS_PROD and (len(SECRET_KEY) < 32 or SECRET_KEY == "nazon-demo-secret-change-me"):
+    raise SystemExit("NAZON_SECRET missing or weak (need 32+ chars). Refusing to start in production.")
+if not SECRET_KEY:
+    SECRET_KEY = secrets.token_hex(32)
+    print("DEV MODE: random SECRET_KEY generated; logins reset on every restart.")
 TOKEN_HOURS = 12
 
 # If DATABASE_URL is set (on Render), use PostgreSQL; otherwise use a local SQLite file.
@@ -130,6 +140,16 @@ def require_owner(authorization):
     return username
 
 
+def require_admin(authorization):
+    username = require_owner(authorization)
+    conn = db()
+    row = conn.execute("SELECT is_admin FROM owners WHERE username=?", (username,)).fetchone()
+    conn.close()
+    if row is None or not row["is_admin"]:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return username
+
+
 def init():
     conn = db()
     pk = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY"
@@ -154,11 +174,19 @@ def init():
         for s in seed:
             conn.execute(
                 "INSERT INTO zones (name, kind, lat, lon, radius_m) VALUES (?, ?, ?, ?, ?)", s)
-    admin = conn.execute("SELECT username FROM owners WHERE username='nazon'").fetchone()
-    if admin is None:
+    # Admin credentials come from the environment; nothing is hardcoded in the repo.
+    admin_user = os.environ.get("NAZON_ADMIN_USER", "nazon")
+    admin_pass = os.environ.get("NAZON_ADMIN_PASS", "")
+    if admin_pass and conn.execute("SELECT username FROM owners WHERE username=?",
+                                   (admin_user,)).fetchone() is None:
         conn.execute(
-            "INSERT INTO owners (username, password, kind, display_name, is_admin, must_change) VALUES (?, ?, ?, ?, 1, 1)",
-            ("nazon", hash_password("nazon123"), "admin", "NAZON Admin"))
+            "INSERT INTO owners (username, password, kind, display_name, is_admin, must_change) VALUES (?, ?, ?, ?, 1, 0)",
+            (admin_user, hash_password(admin_pass), "admin", "NAZON Admin"))
+    n_admin = conn.execute("SELECT COUNT(*) AS c FROM owners WHERE is_admin=1").fetchone()["c"]
+    if n_admin == 0:
+        if IS_PROD:
+            raise SystemExit("No admin account exists and NAZON_ADMIN_PASS is not set.")
+        print("DEV MODE: no admin account. Set NAZON_ADMIN_PASS and restart.")
     conn.commit()
     conn.close()
 
@@ -388,7 +416,8 @@ def get_zones(authorization: str = Header(None)):
 
 
 @app.post("/zones")
-def add_zone(z: Zone):
+def add_zone(z: Zone, authorization: str = Header(None)):
+    require_admin(authorization)
     conn = db()
     conn.execute("INSERT INTO zones (name, kind, lat, lon, radius_m) VALUES (?, ?, ?, ?, ?)",
                  (z.name, z.kind, z.lat, z.lon, z.radius_m))
@@ -398,7 +427,8 @@ def add_zone(z: Zone):
 
 
 @app.delete("/zones/{zone_id}")
-def delete_zone(zone_id: int):
+def delete_zone(zone_id: int, authorization: str = Header(None)):
+    require_admin(authorization)
     conn = db()
     conn.execute("DELETE FROM zones WHERE id=?", (zone_id,))
     conn.commit()

@@ -1,11 +1,13 @@
-import requests, time, random
+import requests, time, random, os
 
-BASE = "http://127.0.0.1:8000"
+BASE = os.environ.get("NAZON_BASE", "http://127.0.0.1:8000")
 
 # Admin login so the simulator can register its demo vehicles and get device keys.
-# (Change the password here if you changed the admin password.)
-ADMIN_USER = "nazon"
-ADMIN_PASS = "nazon123"
+# Credentials come from environment variables (never hardcode them in this file).
+ADMIN_USER = os.environ.get("NAZON_ADMIN_USER", "nazon")
+ADMIN_PASS = os.environ.get("NAZON_ADMIN_PASS")
+if not ADMIN_PASS:
+    raise SystemExit("Set NAZON_ADMIN_PASS (and optionally NAZON_ADMIN_USER) before running the simulator.")
 
 fleet = {
     "NAZON-001": {"pos": [-15.3875, 28.3228], "fuel": 100.0, "sos": False, "key": None},
@@ -17,7 +19,7 @@ fleet = {
 def setup():
     r = requests.post(BASE + "/login", json={"username": ADMIN_USER, "password": ADMIN_PASS})
     if not r.ok:
-        print("Login failed. If you changed the admin password, update ADMIN_PASS in this file.")
+        print("Login failed. Check NAZON_ADMIN_USER / NAZON_ADMIN_PASS match the server's admin account.")
         raise SystemExit(1)
     token = r.json()["token"]
     headers = {"Authorization": "Bearer " + token}
