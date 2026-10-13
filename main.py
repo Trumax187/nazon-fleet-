@@ -464,12 +464,23 @@ def my_vehicles(authorization: str = Header(None)):
     me = conn.execute("SELECT is_admin FROM owners WHERE username=?", (username,)).fetchone()
     is_admin = me is not None and me["is_admin"]
     if is_admin:
-        rows = conn.execute("SELECT plate, owner, device_key FROM vehicles").fetchall()
+        rows = conn.execute(
+            "SELECT plate, owner, device_key_hash FROM vehicles"
+        ).fetchall()
     else:
-        rows = conn.execute("SELECT plate, owner, device_key FROM vehicles WHERE owner=?",
-                            (username,)).fetchall()
+        rows = conn.execute(
+            "SELECT plate, owner, device_key_hash FROM vehicles WHERE owner=?",
+            (username,),
+        ).fetchall()
     conn.close()
-    return [{"plate": r["plate"], "owner": r["owner"], "device_key": r["device_key"]} for r in rows]
+    return [
+        {
+            "plate": r["plate"],
+            "owner": r["owner"],
+            "key_present": bool(r["device_key_hash"]),
+        }
+        for r in rows
+    ]
 
 
 class SosReq(BaseModel):
