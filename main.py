@@ -101,6 +101,18 @@ def verify_password(password, stored):
     return hmac.compare_digest(hash_password(password, salt), stored)
 
 
+def hash_device_key(key, salt=None):
+    """Same scheme as passwords — good enough for device keys, which are
+    already high-entropy random tokens (not user-chosen)."""
+    return hash_password(key, salt)
+
+
+def verify_device_key(submitted, stored_hash):
+    if not submitted or not stored_hash:
+        return False
+    return verify_password(submitted, stored_hash)
+
+
 def make_token(username):
     payload = {"u": username, "exp": int(time.time()) + TOKEN_HOURS * 3600}
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
