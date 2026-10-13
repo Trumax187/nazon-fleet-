@@ -432,6 +432,31 @@ def register_vehicle(req: RegisterVehicle, authorization: str = Header(None)):
     return {"plate": req.plate, "owner": owner, "device_key": key}
 
 
+@app.post("/vehicles/{plate}/rotate-key")
+def rotate_device_key(plate: str, authorization: str = Header(None)):
+    """Invalidate the current device key and issue a new one.
+
+    The plaintext key is returned ONCE in this response and never again.
+    The caller must save it or the device will lose access until the next
+    rotation.
+    """
+    username = require_owner(authorization)
+    conn = db()
+    if not owns_vehicle(conn, username, plate):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Not your vehicle")
+
+    key = secrets.token_hex(16)
+    conn.execute(
+        "UPDATE vehicles SET device_key=NULL, device_key_hash=? WHERE plate=?",
+        (hash_device_key(key), plate),
+    )
+    audit(conn, username, "device_key.rotate", plate)
+    conn.commit()
+    conn.close()
+    return {"plate": plate, "device_key": key}
+
+
 @app.get("/my-vehicles")
 def my_vehicles(authorization: str = Header(None)):
     username = require_owner(authorization)
