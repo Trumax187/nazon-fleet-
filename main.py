@@ -169,7 +169,8 @@ def init():
         username TEXT PRIMARY KEY, password TEXT, kind TEXT,
         display_name TEXT, is_admin INTEGER DEFAULT 0, must_change INTEGER DEFAULT 0)""")
     conn.execute("CREATE TABLE IF NOT EXISTS vehicles ("
-                 "id " + pk + ", plate TEXT UNIQUE, owner TEXT, device_key TEXT)")
+                 "id " + pk + ", plate TEXT UNIQUE, owner TEXT, "
+                 "device_key TEXT, device_key_hash TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS locations ("
                  "id " + pk + ", plate TEXT, lat REAL, lon REAL, "
                  "speed REAL DEFAULT 0, fuel REAL DEFAULT 0, ts TEXT)")
@@ -177,6 +178,10 @@ def init():
                  "id " + pk + ", name TEXT, kind TEXT, lat REAL, lon REAL, radius_m REAL)")
     conn.execute("""CREATE TABLE IF NOT EXISTS sos (
         plate TEXT PRIMARY KEY, active INTEGER DEFAULT 0, ts TEXT)""")
+    # Audit log — who did what, to what, when.
+    conn.execute("CREATE TABLE IF NOT EXISTS audit ("
+                 "id " + pk + ", ts TEXT, actor TEXT, action TEXT, "
+                 "target TEXT, meta TEXT)")
     count = conn.execute("SELECT COUNT(*) AS c FROM zones").fetchone()["c"]
     if count == 0:
         seed = [
