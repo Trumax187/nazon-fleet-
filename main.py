@@ -162,6 +162,16 @@ def require_admin(authorization):
     return username
 
 
+def audit(conn, actor, action, target="", meta=None):
+    """Write an audit row. Uses the caller's open connection so the audit
+    row commits in the same transaction as the action it describes."""
+    conn.execute(
+        "INSERT INTO audit (ts, actor, action, target, meta) VALUES (?, ?, ?, ?, ?)",
+        (datetime.utcnow().isoformat(), actor, action, target,
+         json.dumps(meta or {})),
+    )
+
+
 def init():
     conn = db()
     pk = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY"
