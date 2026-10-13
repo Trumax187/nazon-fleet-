@@ -165,6 +165,16 @@ def require_admin(authorization):
 def init():
     conn = db()
     pk = "SERIAL PRIMARY KEY" if USE_PG else "INTEGER PRIMARY KEY"
+        # Determine if device_key_hash exists — works on both SQLite and Postgres.
+    if USE_PG:
+        col_rows = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='vehicles' AND column_name='device_key_hash'"
+        ).fetchall()
+        has_hash_col = len(col_rows) > 0
+    else:
+        col_rows = conn.execute("SELECT name FROM pragma_table_info('vehicles')").fetchall()
+        has_hash_col = any(c["name"] == "device_key_hash" for c in col_rows)
     conn.execute("""CREATE TABLE IF NOT EXISTS owners (
         username TEXT PRIMARY KEY, password TEXT, kind TEXT,
         display_name TEXT, is_admin INTEGER DEFAULT 0, must_change INTEGER DEFAULT 0)""")
@@ -182,6 +192,28 @@ def init():
     conn.execute("CREATE TABLE IF NOT EXISTS audit ("
                  "id " + pk + ", ts TEXT, actor TEXT, action TEXT, "
                  "target TEXT, meta TEXT)")
+        # --- batch 2 migration ---
+    # Existing databases were created before device_key_hash existed.
+    # SQLite's CREATE TABLE IF NOT EXISTS won't add it, so do it explicitly.
+    if not has_hash_col:
+        conn.execute("ALTER TABLE vehicles ADD COLUMN device_key_hash TEXT")
+        print("Added device_key_hash column to vehicles.")
+
+    # Hash any remaining plaintext keys, then clear plaintext.
+    # Idempotent — safe to run every startup; after the first pass device_key is NULL.
+    legacy = conn.execute(
+        "SELECT plate, device_key FROM vehicles "
+        "WHERE device_key IS NOT NULL AND device_key <> ''"
+    ).fetchall()
+    for row in legacy:
+        conn.execute(
+            "UPDATE vehicles SET device_key_hash=?, device_key=NULL WHERE plate=?",
+            (hash_device_key(row["device_key"]), row["plate"]),
+        )
+    if legacy:
+        print(f"Migrated {len(legacy)} plaintext device key(s) to hashed form.")
+    # --- end batch 2 migration ---
+
     count = conn.execute("SELECT COUNT(*) AS c FROM zones").fetchone()["c"]
     if count == 0:
         seed = [
