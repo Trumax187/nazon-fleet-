@@ -399,16 +399,36 @@ def register_vehicle(req: RegisterVehicle, authorization: str = Header(None)):
     if conn.execute("SELECT username FROM owners WHERE username=?", (owner,)).fetchone() is None:
         conn.close()
         raise HTTPException(status_code=400, detail="Owner account does not exist")
-    existing = conn.execute("SELECT plate FROM vehicles WHERE plate=?", (req.plate,)).fetchone()
+
+    existing = conn.execute(
+        "SELECT plate, owner FROM vehicles WHERE plate=?", (req.plate,)
+    ).fetchone()
+
+    if existing and not is_admin:
+        conn.close()
+        raise HTTPException(status_code=409, detail="Plate already registered")
+
     key = secrets.token_hex(16)
+    key_hash = hash_device_key(key)
+
     if existing:
-        conn.execute("UPDATE vehicles SET owner=?, device_key=? WHERE plate=?",
-                     (owner, key, req.plate))
+        conn.execute(
+            "UPDATE vehicles SET owner=?, device_key=NULL, device_key_hash=? WHERE plate=?",
+            (owner, key_hash, req.plate),
+        )
+        audit(conn, username, "vehicle.reassign", req.plate,
+              {"owner": owner, "previous_owner": existing["owner"]})
     else:
-        conn.execute("INSERT INTO vehicles (plate, owner, device_key) VALUES (?, ?, ?)",
-                     (req.plate, owner, key))
+        conn.execute(
+            "INSERT INTO vehicles (plate, owner, device_key, device_key_hash) "
+            "VALUES (?, ?, NULL, ?)",
+            (req.plate, owner, key_hash),
+        )
+        audit(conn, username, "vehicle.register", req.plate, {"owner": owner})
+
     conn.commit()
     conn.close()
+    # Plaintext key is returned exactly once, here, and never again.
     return {"plate": req.plate, "owner": owner, "device_key": key}
 
 
