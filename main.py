@@ -365,11 +365,13 @@ def create_account(req: NewAccount, authorization: str = Header(None)):
 @app.post("/track")
 def track(p: Ping):
     conn = db()
-    v = conn.execute("SELECT device_key FROM vehicles WHERE plate=?", (p.plate,)).fetchone()
+    v = conn.execute(
+        "SELECT device_key_hash FROM vehicles WHERE plate=?", (p.plate,)
+    ).fetchone()
     if v is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Unknown vehicle. Register it first.")
-    if not p.device_key or not hmac.compare_digest(p.device_key, v["device_key"] or ""):
+    if not verify_device_key(p.device_key, v["device_key_hash"]):
         conn.close()
         raise HTTPException(status_code=401, detail="Invalid device key")
     conn.execute("""INSERT INTO locations (plate, lat, lon, speed, fuel, ts)
