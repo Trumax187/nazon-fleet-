@@ -966,16 +966,30 @@ MOBILE_HTML = """<!DOCTYPE html>
       const sel=document.getElementById("vehSel");
       if(!list.length){ document.getElementById("pickErr").textContent="No vehicles registered to this account yet."; }
       sel.innerHTML="";
-      list.forEach(v=>{ const o=document.createElement("option"); o.value=JSON.stringify({plate:v.plate,key:v.device_key}); o.textContent=v.plate+"  ("+v.owner+")"; sel.appendChild(o); });
+      list.forEach(v=>{
+        const o=document.createElement("option");
+        o.value=v.plate;
+        o.textContent=v.plate+"  ("+v.owner+")";
+        sel.appendChild(o);
+      });
+      // Restore any previously-saved key for this browser.
+      const saved = localStorage.getItem("nazon_devkey_"+sel.value);
+      if (saved) document.getElementById("devKey").value = saved;
       show("pickCard");
     }
 
     function pick(){
       const sel=document.getElementById("vehSel");
-      if(!sel.value){ document.getElementById("pickErr").textContent="No vehicle to select."; return; }
-      const v=JSON.parse(sel.value);
-      PLATE=v.plate; DEVICE_KEY=v.key;
-      document.getElementById("plateLbl").textContent=PLATE;
+      const keyInput=document.getElementById("devKey");
+      const err=document.getElementById("pickErr");
+      err.textContent="";
+      if(!sel.value){ err.textContent="No vehicle to select."; return; }
+      const key = keyInput.value.trim();
+      if(!key){ err.textContent="Paste the device key from the dashboard."; return; }
+      PLATE = sel.value;
+      DEVICE_KEY = key;
+      localStorage.setItem("nazon_devkey_"+PLATE, key);
+      document.getElementById("plateLbl").textContent = PLATE;
       show("trackCard");
     }
 
