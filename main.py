@@ -865,7 +865,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if(!b) return;
       e.stopPropagation();
       const plate = b.getAttribute("data-plate");
-      if(b.getAttribute("data-act")==="sos") triggerSos(plate);
+      const act = b.getAttribute("data-act");
+      if(act==="sos") triggerSos(plate);
+      else if(act==="rotate") rotateKey(plate);
       else clearSos(plate);
     });
 
