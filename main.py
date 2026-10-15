@@ -774,13 +774,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     async function triggerSos(plate){ try{ await authFetch("/sos",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
     async function clearSos(plate){ try{ await authFetch("/sos/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
     async function rotateKey(plate){
-      if(!confirm("Rotate the device key for "+plate+"?\n\nThe current phone will stop working until the new key is entered.")) return;
+      if(!confirm("Rotate the device key for "+plate+"?\\n\\nThe current phone will stop working until the new key is entered.")) return;
       try{
         const r = await authFetch("/vehicles/"+encodeURIComponent(plate)+"/rotate-key", {method:"POST"});
         if(!r.ok){ alert("Rotate failed: "+r.status); return; }
         const d = await r.json();
         await navigator.clipboard.writeText(d.device_key).catch(()=>{});
-        alert("New device key for "+plate+":\n\n"+d.device_key+"\n\n(Copied to clipboard. Shown only once.)");
+        alert("New device key for "+plate+":\\n\\n"+d.device_key+"\\n\\n(Copied to clipboard. Shown only once.)");
       }catch(e){ alert("Rotate failed: "+e); }
     }
     async function loadZones(){
