@@ -26,6 +26,10 @@ def setup():
     for plate in fleet:
         rr = requests.post(BASE + "/vehicles", headers=headers,
                            json={"plate": plate, "owner": ADMIN_USER})
+        if not rr.ok:
+            raise SystemExit(
+                f"Vehicle registration failed for {plate}: "
+                f"{rr.status_code} {rr.text}")
         fleet[plate]["key"] = rr.json()["device_key"]
     print("Vehicles registered with device keys.")
     return headers
@@ -50,24 +54,32 @@ while True:
         v["fuel"] = max(0.0, round(v["fuel"], 1))
 
         try:
-            requests.post(BASE + "/track", json={
+            r = requests.post(BASE + "/track", json={
                 "plate": plate, "lat": v["pos"][0], "lon": v["pos"][1],
                 "speed": speed, "fuel": v["fuel"], "device_key": v["key"]})
+            if not r.ok:
+                print(f"track rejected for {plate}: {r.status_code} {r.text}")
         except Exception as e:
             print("error:", e)
 
         if not v["sos"] and random.random() < 0.02:
             try:
-                requests.post(BASE + "/sos", headers=headers, json={"plate": plate})
-                v["sos"] = True
-                print(f"*** {plate} triggered SOS ***")
+                r = requests.post(BASE + "/sos", headers=headers, json={"plate": plate})
+                if r.ok:
+                    v["sos"] = True
+                    print(f"*** {plate} triggered SOS ***")
+                else:
+                    print(f"sos rejected: {r.status_code} {r.text}")
             except Exception as e:
                 print("sos error:", e)
         elif v["sos"] and random.random() < 0.15:
             try:
-                requests.post(BASE + "/sos/clear", headers=headers, json={"plate": plate})
-                v["sos"] = False
-                print(f"--- {plate} SOS cleared ---")
+                r = requests.post(BASE + "/sos/clear", headers=headers, json={"plate": plate})
+                if r.ok:
+                    v["sos"] = False
+                    print(f"--- {plate} SOS cleared ---")
+                else:
+                    print(f"sos clear rejected: {r.status_code} {r.text}")
             except Exception as e:
                 print("sos clear error:", e)
 
