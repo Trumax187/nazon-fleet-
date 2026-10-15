@@ -997,7 +997,13 @@ MOBILE_HTML = """<!DOCTYPE html>
       try{
         const r=await fetch("/track",{method:"POST",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({plate:PLATE, lat:lat, lon:lon, speed:kmh, fuel:100, device_key:DEVICE_KEY})});
-        if(!r.ok){ setStatus("Server rejected the update (key/vehicle problem)."); }
+        if(r.status===401){
+          setStatus("Device key rejected - it was rotated. Get a new key from the dashboard.");
+          localStorage.removeItem("nazon_devkey_"+PLATE);
+          stop();
+        } else if(!r.ok){
+          setStatus("Server rejected the update ("+r.status+").");
+        }
       }catch(e){ setStatus("Send failed - is the server reachable?"); }
     }
 
