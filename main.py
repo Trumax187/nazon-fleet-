@@ -924,6 +924,11 @@ MOBILE_HTML = """<!DOCTYPE html>
   <div id="pickCard" class="card" style="display:none;">
     <div class="row muted">Choose the vehicle this phone is in</div>
     <select id="vehSel"></select>
+    <div class="row muted" style="margin-top:12px;">Paste the device key</div>
+    <input id="devKey" placeholder="e.g. 3f9a2c..." autocomplete="off" spellcheck="false" />
+    <div class="row muted" style="font-size:12px;">
+      Get this from the dashboard: Vehicles &rarr; Rotate key. The key is shown only once.
+    </div>
     <button class="gobtn" id="pickBtn">Use this vehicle</button>
     <div class="err" id="pickErr"></div>
   </div>
