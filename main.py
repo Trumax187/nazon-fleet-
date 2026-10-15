@@ -86,6 +86,29 @@ def db():
     return DBWrapper()
 
 
+# --- simple in-process rate limiter ---
+# Tracks recent request timestamps per key. Resets on restart. Good enough
+# for a single-worker deployment; if you scale to multiple workers, replace
+# with a shared store (Redis) so limits are enforced across processes.
+_RATE_BUCKETS = {}
+
+def rate_limit(key, max_hits, window_seconds):
+    """Raise 429 if `key` has exceeded `max_hits` in the last `window_seconds`."""
+    now = time.time()
+    cutoff = now - window_seconds
+    hits = _RATE_BUCKETS.get(key, [])
+    # drop expired
+    hits = [t for t in hits if t > cutoff]
+    if len(hits) >= max_hits:
+        _RATE_BUCKETS[key] = hits
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many requests. Limit is {max_hits} per {window_seconds}s.",
+        )
+    hits.append(now)
+    _RATE_BUCKETS[key] = hits
+
+
 def hash_password(password, salt=None):
     if salt is None:
         salt = secrets.token_hex(16)
@@ -364,6 +387,9 @@ def create_account(req: NewAccount, authorization: str = Header(None)):
 
 @app.post("/track")
 def track(p: Ping):
+    # Per-plate rate limit: 60 pings per minute is 2/sec sustained.
+    # Anything faster than that is either a misconfigured device or abuse.
+    rate_limit("track:" + p.plate, max_hits=60, window_seconds=60)
     conn = db()
     v = conn.execute(
         "SELECT device_key_hash FROM vehicles WHERE plate=?", (p.plate,)
@@ -498,6 +524,9 @@ def owns_vehicle(conn, username, plate):
 @app.post("/sos")
 def sos_trigger(s: SosReq, authorization: str = Header(None)):
     username = require_owner(authorization)
+    # Per-user rate limit: 10 SOS triggers per minute is generous but
+    # prevents a runaway client from flooding the alert pipeline.
+    rate_limit("sos:" + username, max_hits=10, window_seconds=60)
     conn = db()
     if not owns_vehicle(conn, username, s.plate):
         conn.close()
@@ -513,6 +542,7 @@ def sos_trigger(s: SosReq, authorization: str = Header(None)):
 @app.post("/sos/clear")
 def sos_clear(s: SosReq, authorization: str = Header(None)):
     username = require_owner(authorization)
+    rate_limit("sos-clear:" + username, max_hits=10, window_seconds=60)
     conn = db()
     if not owns_vehicle(conn, username, s.plate):
         conn.close()
