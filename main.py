@@ -708,6 +708,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     let TOKEN = localStorage.getItem("nazon_token") || null;
+    let IS_ADMIN = false;
     let refreshTimer = null;
 
     function authFetch(url, opts){
@@ -728,6 +729,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if(!res.ok){ err.textContent = "Invalid username or password"; return; }
         const d = await res.json();
         TOKEN = d.token;
+        IS_ADMIN = !!d.is_admin;
         localStorage.setItem("nazon_token", TOKEN);
         document.getElementById("barSub").textContent = d.display_name || "Live Fleet Tracking";
         document.getElementById("loginOverlay").style.display = "none";
@@ -866,7 +868,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     if(TOKEN){
       authFetch("/whoami").then(r=>{
         if(r.ok){
-          return r.json().then(d=>{
+        return r.json().then(d=>{
+            IS_ADMIN = !!d.is_admin;
             document.getElementById("barSub").textContent = d.display_name || "Live Fleet Tracking";
             document.getElementById("loginOverlay").style.display = "none";
             document.getElementById("logoutBtn").style.display = "inline-block";
