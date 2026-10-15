@@ -664,6 +664,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .btn { font-size:11px; font-weight:bold; border:none; border-radius:5px; padding:5px 9px; cursor:pointer; color:#fff; }
     .btn.sos { background:#b30000; }
     .btn.clear { background:#555; }
+    .btn.rot { background:#555; margin-left:6px; }
   </style>
 </head>
 <body>
@@ -772,7 +773,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     function icon(state){ const c = state==="sos"?"#b30000":(state==="over"?"#e74c3c":"#0b3d91"); const sz = state==="sos"?"width:20px;height:20px;":"width:16px;height:16px;"; return L.divIcon({className:"", html:'<div style="'+sz+'border-radius:50%;border:2px solid #fff;background:'+c+';box-shadow:0 0 6px rgba(0,0,0,.5)"></div>', iconSize:[20,20], iconAnchor:[10,10]}); }
     async function triggerSos(plate){ try{ await authFetch("/sos",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
     async function clearSos(plate){ try{ await authFetch("/sos/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
-
+    async function rotateKey(plate){
+      if(!confirm("Rotate the device key for "+plate+"?\n\nThe current phone will stop working until the new key is entered.")) return;
+      try{
+        const r = await authFetch("/vehicles/"+encodeURIComponent(plate)+"/rotate-key", {method:"POST"});
+        if(!r.ok){ alert("Rotate failed: "+r.status); return; }
+        const d = await r.json();
+        await navigator.clipboard.writeText(d.device_key).catch(()=>{});
+        alert("New device key for "+plate+":\n\n"+d.device_key+"\n\n(Copied to clipboard. Shown only once.)");
+      }catch(e){ alert("Rotate failed: "+e); }
+    }
     async function loadZones(){
       try{
         const res = await authFetch("/zones");
@@ -819,9 +829,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           let fclass="fuelbar"; if(v.fuel<20) fclass+=" crit"; else if(v.fuel<40) fclass+=" low";
           const card=document.createElement("div");
           card.className="card"+(sos?" sos":((over||theft||inZone)?" alert":""));
-          const btn = sos
+          const sosBtn = sos
             ? '<button class="btn clear" data-plate="'+v.plate+'" data-act="clear">Clear SOS</button>'
             : '<button class="btn sos" data-plate="'+v.plate+'" data-act="sos">SOS</button>';
+          const rotateBtn = IS_ADMIN
+            ? '<button class="btn rot" data-plate="'+v.plate+'" data-act="rotate">Rotate key</button>'
+            : '';
+          const btn = sosBtn + rotateBtn;
           card.innerHTML=
             '<div class="plate">'+v.plate+
               (sos?'<span class="tag" style="background:#b30000">SOS</span>':'')+
