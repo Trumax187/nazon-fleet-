@@ -208,12 +208,16 @@ def init():
     else:
         col_rows = conn.execute("SELECT name FROM pragma_table_info('vehicles')").fetchall()
         has_hash_col = any(c["name"] == "device_key_hash" for c in col_rows)
+    conn.execute("""CREATE TABLE IF NOT EXISTS orgs (
+        id INTEGER PRIMARY KEY, kind TEXT, display_name TEXT,
+        report_cadence TEXT, alert_profile TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS owners (
         username TEXT PRIMARY KEY, password TEXT, kind TEXT,
-        display_name TEXT, is_admin INTEGER DEFAULT 0, must_change INTEGER DEFAULT 0)""")
+        display_name TEXT, is_admin INTEGER DEFAULT 0, must_change INTEGER DEFAULT 0,
+        org_id INTEGER)""")
     conn.execute("CREATE TABLE IF NOT EXISTS vehicles ("
                  "id " + pk + ", plate TEXT UNIQUE, owner TEXT, "
-                 "device_key TEXT, device_key_hash TEXT)")
+                 "device_key TEXT, device_key_hash TEXT, org_id INTEGER)")
     conn.execute("CREATE TABLE IF NOT EXISTS locations ("
                  "id " + pk + ", plate TEXT, lat REAL, lon REAL, "
                  "speed REAL DEFAULT 0, fuel REAL DEFAULT 0, ts TEXT)")
@@ -232,7 +236,7 @@ def init():
         conn.execute("ALTER TABLE vehicles ADD COLUMN device_key_hash TEXT")
         print("Added device_key_hash column to vehicles.")
 
-    # Hash any remaining plaintext keys, then clear plaintext.
+       # Hash any remaining plaintext keys, then clear plaintext.
     # Idempotent — safe to run every startup; after the first pass device_key is NULL.
     legacy = conn.execute(
         "SELECT plate, device_key FROM vehicles "
@@ -245,7 +249,34 @@ def init():
         )
     if legacy:
         print(f"Migrated {len(legacy)} plaintext device key(s) to hashed form.")
-    # --- end batch 2 migration ---
+
+    # --- batch 3 migration (phase 1) ---
+    # Add org_id to owners and vehicles if they don't have it yet.
+    if USE_PG:
+        has_org_owners = len(conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='owners' AND column_name='org_id'").fetchall()) > 0
+        has_org_vehicles = len(conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='vehicles' AND column_name='org_id'").fetchall()) > 0
+    else:
+        has_org_owners = any(c["name"] == "org_id" for c in conn.execute("SELECT name FROM pragma_table_info('owners')").fetchall())
+        has_org_vehicles = any(c["name"] == "org_id" for c in conn.execute("SELECT name FROM pragma_table_info('vehicles')").fetchall())
+
+    if not has_org_owners:
+        conn.execute("ALTER TABLE owners ADD COLUMN org_id INTEGER")
+    if not has_org_vehicles:
+        conn.execute("ALTER TABLE vehicles ADD COLUMN org_id INTEGER")
+
+    # Seed default org if none exists
+    if conn.execute("SELECT id FROM orgs").fetchone() is None:
+        conn.execute("""INSERT INTO orgs (id, kind, display_name, report_cadence, alert_profile)
+                        VALUES (1, 'company', 'NAZON Default', 'weekly', 'both')""")
+
+    # Backfill: link existing owners and vehicles to org 1
+    conn.execute("UPDATE owners SET org_id=1 WHERE org_id IS NULL")
+    conn.execute("UPDATE vehicles SET org_id=1 WHERE org_id IS NULL")
+    # --- end batch 3 migration ---
 
     count = conn.execute("SELECT COUNT(*) AS c FROM zones").fetchone()["c"]
     if count == 0:
