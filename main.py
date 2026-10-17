@@ -362,10 +362,26 @@ def login(req: LoginReq):
     conn.close()
     if row is None or not verify_password(req.password, row["password"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
+@app.post("/login")
+def login(req: LoginReq):
+    conn = db()
+    row = conn.execute("SELECT * FROM owners WHERE username=?", (req.username,)).fetchone()
+    if row is None or not verify_password(req.password, row["password"]):
+        conn.close()
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    org = conn.execute("SELECT display_name, kind FROM orgs WHERE id=?", (row["org_id"],)).fetchone()
+    conn.close()
+    
+    org_name = org["display_name"] if org else "NAZON Fleet"
+    org_kind = org["kind"] if org else "company"
+    
     return {
         "token": make_token(row["username"]),
         "username": row["username"],
         "display_name": row["display_name"],
+        "org_name": org_name,
+        "org_kind": org_kind,
         "is_admin": bool(row["is_admin"]),
         "must_change": bool(row["must_change"]),
     }
@@ -375,13 +391,26 @@ def login(req: LoginReq):
 def whoami(authorization: str = Header(None)):
     username = require_owner(authorization)
     conn = db()
-    row = conn.execute("SELECT username, display_name, is_admin, kind FROM owners WHERE username=?",
+    row = conn.execute("SELECT username, display_name, is_admin, kind, org_id FROM owners WHERE username=?",
                        (username,)).fetchone()
-    conn.close()
     if row is None:
+        conn.close()
         raise HTTPException(status_code=401, detail="Unknown account")
-    return {"username": row["username"], "display_name": row["display_name"],
-            "is_admin": bool(row["is_admin"]), "kind": row["kind"]}
+    
+    org = conn.execute("SELECT display_name, kind FROM orgs WHERE id=?", (row["org_id"],)).fetchone()
+    conn.close()
+    
+    org_name = org["display_name"] if org else "NAZON Fleet"
+    org_kind = org["kind"] if org else "company"
+    
+    return {
+        "username": row["username"],
+        "display_name": row["display_name"],
+        "org_name": org_name,
+        "org_kind": org_kind,
+        "is_admin": bool(row["is_admin"]),
+        "kind": row["kind"]
+    }
 
 
 @app.post("/change-password")
@@ -828,7 +857,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         TOKEN = d.token;
         IS_ADMIN = !!d.is_admin;
         localStorage.setItem("nazon_token", TOKEN);
-        document.getElementById("barSub").textContent = d.display_name || "Live Fleet Tracking";
+        document.getElementById("barSub").textContent = d.org_name || d.display_name || "Live Fleet Tracking";
         document.getElementById("loginOverlay").style.display = "none";
         document.getElementById("logoutBtn").style.display = "inline-block";
         if(d.must_change){ document.getElementById("pwOverlay").style.display = "flex"; }
@@ -982,7 +1011,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if(r.ok){
         return r.json().then(d=>{
             IS_ADMIN = !!d.is_admin;
-            document.getElementById("barSub").textContent = d.display_name || "Live Fleet Tracking";
+            document.getElementById("barSub").textContent = d.org_name || d.display_name || "Live Fleet Tracking";
             document.getElementById("loginOverlay").style.display = "none";
             document.getElementById("logoutBtn").style.display = "inline-block";
             startApp();
