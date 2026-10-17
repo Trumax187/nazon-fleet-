@@ -346,8 +346,9 @@ class LoginReq(BaseModel):
 class NewAccount(BaseModel):
     username: str
     password: str
-    kind: str = "individual"     # "company" or "individual"
+    kind: str = "personal"       # company | ngo | personal | driver
     display_name: str = ""
+    role: str = "driver"         # admin | manager | driver
 
 
 class ChangePw(BaseModel):
@@ -408,12 +409,24 @@ def create_account(req: NewAccount, authorization: str = Header(None)):
     if exists:
         conn.close()
         raise HTTPException(status_code=400, detail="Username already taken")
+    # Create a new org for this account (unless it's an admin being added to the default org)
     conn.execute(
-        "INSERT INTO owners (username, password, kind, display_name, is_admin, must_change) VALUES (?, ?, ?, ?, 0, 1)",
-        (req.username, hash_password(req.password), req.kind, req.display_name or req.username))
+        "INSERT INTO orgs (kind, display_name, report_cadence, alert_profile) VALUES (?, ?, ?, ?)",
+        (req.kind, req.display_name or req.username, "weekly", "both")
+    )
+    # Get the newly created org's ID (works on both SQLite and Postgres)
+    if USE_PG:
+        org_id = conn.execute("SELECT currval(pg_get_serial_sequence('orgs', 'id')) AS id").fetchone()["id"]
+    else:
+        org_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+    conn.execute(
+        "INSERT INTO owners (username, password, kind, display_name, is_admin, must_change, org_id) VALUES (?, ?, ?, ?, 0, 1, ?)",
+        (req.username, hash_password(req.password), req.kind, req.display_name or req.username, org_id))
+    
     conn.commit()
     conn.close()
-    return {"created": req.username}
+    return {"created": req.username, "org_id": org_id, "kind": req.kind}
 
 
 @app.post("/track")
