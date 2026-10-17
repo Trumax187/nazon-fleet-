@@ -540,13 +540,19 @@ def my_vehicles(authorization: str = Header(None)):
     me = conn.execute("SELECT is_admin FROM owners WHERE username=?", (username,)).fetchone()
     is_admin = me is not None and me["is_admin"]
     if is_admin:
+        # Global admin sees everything
         rows = conn.execute(
             "SELECT plate, owner, device_key_hash FROM vehicles"
         ).fetchall()
     else:
+        # Normal users see only vehicles in their own org
+        me_org = conn.execute(
+            "SELECT org_id FROM owners WHERE username=?", (username,)
+        ).fetchone()
+        my_org_id = me_org["org_id"] if me_org else -1
         rows = conn.execute(
-            "SELECT plate, owner, device_key_hash FROM vehicles WHERE owner=?",
-            (username,),
+            "SELECT plate, owner, device_key_hash FROM vehicles WHERE org_id=?",
+            (my_org_id,),
         ).fetchall()
     conn.close()
     return [
@@ -564,11 +570,17 @@ class SosReq(BaseModel):
 
 
 def owns_vehicle(conn, username, plate):
-    me = conn.execute("SELECT is_admin FROM owners WHERE username=?", (username,)).fetchone()
-    if me is not None and me["is_admin"]:
+    me = conn.execute(
+        "SELECT is_admin, org_id FROM owners WHERE username=?", (username,)
+    ).fetchone()
+    if me is None:
+        return False
+    if me["is_admin"]:
         return True
-    v = conn.execute("SELECT owner FROM vehicles WHERE plate=?", (plate,)).fetchone()
-    return v is not None and v["owner"] == username
+    v = conn.execute(
+        "SELECT org_id FROM vehicles WHERE plate=?", (plate,)
+    ).fetchone()
+    return v is not None and v["org_id"] == me["org_id"]
 
 
 @app.post("/sos")
@@ -640,11 +652,15 @@ def fleet(authorization: str = Header(None)):
     me = conn.execute("SELECT is_admin FROM owners WHERE username=?", (username,)).fetchone()
     is_admin = me is not None and me["is_admin"]
 
-    # which plates may this account see?
+     # which plates may this account see?
     if is_admin:
         allowed = None   # all
     else:
-        owned = conn.execute("SELECT plate FROM vehicles WHERE owner=?", (username,)).fetchall()
+        me_org = conn.execute(
+            "SELECT org_id FROM owners WHERE username=?", (username,)
+        ).fetchone()
+        my_org_id = me_org["org_id"] if me_org else -1
+        owned = conn.execute("SELECT plate FROM vehicles WHERE org_id=?", (my_org_id,)).fetchall()
         allowed = {r["plate"] for r in owned}
 
     rows = conn.execute("""
