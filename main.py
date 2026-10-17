@@ -478,21 +478,27 @@ def register_vehicle(req: RegisterVehicle, authorization: str = Header(None)):
         conn.close()
         raise HTTPException(status_code=409, detail="Plate already registered")
 
+    # Get the owner's org_id so the vehicle is isolated to that org
+    owner_row = conn.execute(
+        "SELECT org_id FROM owners WHERE username=?", (owner,)
+    ).fetchone()
+    owner_org_id = owner_row["org_id"] if owner_row else 1
+
     key = secrets.token_hex(16)
     key_hash = hash_device_key(key)
 
     if existing:
         conn.execute(
-            "UPDATE vehicles SET owner=?, device_key=NULL, device_key_hash=? WHERE plate=?",
-            (owner, key_hash, req.plate),
+            "UPDATE vehicles SET owner=?, org_id=?, device_key=NULL, device_key_hash=? WHERE plate=?",
+            (owner, owner_org_id, key_hash, req.plate),
         )
         audit(conn, username, "vehicle.reassign", req.plate,
               {"owner": owner, "previous_owner": existing["owner"]})
     else:
         conn.execute(
-            "INSERT INTO vehicles (plate, owner, device_key, device_key_hash) "
-            "VALUES (?, ?, NULL, ?)",
-            (req.plate, owner, key_hash),
+            "INSERT INTO vehicles (plate, owner, org_id, device_key, device_key_hash) "
+            "VALUES (?, ?, ?, NULL, ?)",
+            (req.plate, owner, owner_org_id, key_hash),
         )
         audit(conn, username, "vehicle.register", req.plate, {"owner": owner})
 
