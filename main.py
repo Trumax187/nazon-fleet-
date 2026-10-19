@@ -670,6 +670,24 @@ def sos_clear(s: SosReq, authorization: str = Header(None)):
     conn.commit()
     conn.close()
     return {"sos": "cleared", "plate": s.plate}
+@app.post("/incidents/acknowledge")
+def acknowledge_incident(req: SosReq, authorization: str = Header(None)):
+    username = require_owner(authorization)
+    conn = db()
+    if not owns_vehicle(conn, username, req.plate):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Not your vehicle")
+    
+    # Mark the most recent unacknowledged theft for this plate as acknowledged
+    conn.execute("""
+        UPDATE incidents SET acknowledged_at=?, acknowledged_by=? 
+        WHERE plate=? AND type='fuel_theft' AND acknowledged_at IS NULL
+    """, (datetime.utcnow().isoformat(), username, req.plate))
+    
+    audit(conn, username, "incident.ack", req.plate)
+    conn.commit()
+    conn.close()
+    return {"acknowledged": True, "plate": req.plate}
 
 
 @app.get("/zones")
@@ -935,6 +953,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     function icon(state){ const c = state==="sos"?"#b30000":(state==="over"?"#e74c3c":"#0b3d91"); const sz = state==="sos"?"width:20px;height:20px;":"width:16px;height:16px;"; return L.divIcon({className:"", html:'<div style="'+sz+'border-radius:50%;border:2px solid #fff;background:'+c+';box-shadow:0 0 6px rgba(0,0,0,.5)"></div>', iconSize:[20,20], iconAnchor:[10,10]}); }
     async function triggerSos(plate){ try{ await authFetch("/sos",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
     async function clearSos(plate){ try{ await authFetch("/sos/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
+    async function acknowledgeTheft(plate){ try{ await authFetch("/incidents/acknowledge",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({plate:plate})}); refresh(); }catch(e){ console.log(e); } }
     async function rotateKey(plate){
       if(!confirm("Rotate the device key for "+plate+"?\\n\\nThe current phone will stop working until the new key is entered.")) return;
       try{
@@ -994,10 +1013,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const sosBtn = sos
             ? '<button class="btn clear" data-plate="'+v.plate+'" data-act="clear">Clear SOS</button>'
             : '<button class="btn sos" data-plate="'+v.plate+'" data-act="sos">SOS</button>';
+          
+          const theftBtn = theft
+            ? '<button class="btn" style="background:#e67e22" data-plate="'+v.plate+'" data-act="ack">Ack Theft</button>'
+            : '';
+
           const rotateBtn = IS_ADMIN
             ? '<button class="btn rot" data-plate="'+v.plate+'" data-act="rotate">Rotate key</button>'
             : '';
-          const btn = sosBtn + rotateBtn;
+          const btn = sosBtn + theftBtn + rotateBtn;
           card.innerHTML=
             '<div class="plate">'+v.plate+
               (sos?'<span class="tag" style="background:#b30000">SOS</span>':'')+
@@ -1030,6 +1054,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const act = b.getAttribute("data-act");
       if(act==="sos") triggerSos(plate);
       else if(act==="rotate") rotateKey(plate);
+      else if(act==="ack") acknowledgeTheft(plate);
       else clearSos(plate);
     });
 
