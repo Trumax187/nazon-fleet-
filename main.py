@@ -293,13 +293,14 @@ def init():
     if admin_pass and conn.execute("SELECT username FROM owners WHERE username=?",
                                    (admin_user,)).fetchone() is None:
         conn.execute(
-            "INSERT INTO owners (username, password, kind, display_name, is_admin, must_change) VALUES (?, ?, ?, ?, 1, 0)",
+         "INSERT INTO owners (username, password, kind, display_name, is_admin, must_change, org_id) VALUES (?, ?, ?, ?, 1, 0, 1)",
             (admin_user, hash_password(admin_pass), "admin", "NAZON Admin"))
     n_admin = conn.execute("SELECT COUNT(*) AS c FROM owners WHERE is_admin=1").fetchone()["c"]
     if n_admin == 0:
         if IS_PROD:
             raise SystemExit("No admin account exists and NAZON_ADMIN_PASS is not set.")
         print("DEV MODE: no admin account. Set NAZON_ADMIN_PASS and restart.")
+        conn.execute("UPDATE owners SET org_id=1 WHERE org_id IS NULL")
     conn.commit()
     conn.close()
 
@@ -355,13 +356,7 @@ class ChangePw(BaseModel):
     new_password: str
 
 
-@app.post("/login")
-def login(req: LoginReq):
-    conn = db()
-    row = conn.execute("SELECT * FROM owners WHERE username=?", (req.username,)).fetchone()
-    conn.close()
-    if row is None or not verify_password(req.password, row["password"]):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+
 @app.post("/login")
 def login(req: LoginReq):
     conn = db()
