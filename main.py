@@ -731,6 +731,14 @@ def fleet(authorization: str = Header(None)):
     sos_rows = conn.execute("SELECT plate FROM sos WHERE active=1").fetchall()
     sos_set = {r["plate"] for r in sos_rows}
 
+    # Get any unacknowledged theft incidents from the last 24 hours
+    theft_rows = conn.execute("""
+        SELECT plate FROM incidents 
+        WHERE type='fuel_theft' AND acknowledged_at IS NULL 
+        AND detected_at > datetime('now', '-1 day')
+    """).fetchall()
+    theft_set = {r["plate"] for r in theft_rows}
+
     out = []
     for r in rows:
         if allowed is not None and r["plate"] not in allowed:
@@ -751,6 +759,7 @@ def fleet(authorization: str = Header(None)):
             "speed": r["speed"], "fuel": r["fuel"], "ts": r["ts"],
             "speeding": r["speed"] > SPEED_LIMIT,
             "fuel_drop": fuel_drop,
+            "theft_alert": r["plate"] in theft_set,
             "danger_zone": in_zone,
             "sos": r["plate"] in sos_set
         })
@@ -968,7 +977,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const limit=data.speed_limit, fleet=data.vehicles;
         const list=document.getElementById("list"); list.innerHTML=""; let alerts=0; let sosPlates=[];
         fleet.forEach(v=>{
-          const pos=[v.lat,v.lon], over=v.speeding, theft=v.fuel_drop, inZone=v.danger_zone, sos=v.sos;
+          const pos=[v.lat,v.lon], over=v.speeding, theft=v.theft_alert, inZone=v.danger_zone, sos=v.sos;
           if(over) alerts++; if(theft) alerts++; if(inZone) alerts++; if(sos){ alerts++; sosPlates.push(v.plate); }
           const state = sos?"sos":(over?"over":"normal");
           const lblClass = "plateLbl"+(sos?" sos":(over?" over":""));
@@ -993,7 +1002,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             '<div class="plate">'+v.plate+
               (sos?'<span class="tag" style="background:#b30000">SOS</span>':'')+
               (over?'<span class="tag speed">SPEEDING</span>':'')+
-              (theft?'<span class="tag fuel">FUEL DROP</span>':'')+
+              (theft?'<span class="tag fuel" style="animation:flash 0.8s infinite">THEFT ALERT</span>':'')+
               (inZone?'<span class="tag zone">DANGER ZONE</span>':'')+'</div>'+
             '<div class="meta"><span class="dot"></span>Active  -  '+ago(v.ts)+'</div>'+
             (inZone?'<div class="meta" style="color:#8e0000;font-weight:bold">In: '+inZone+'</div>':'')+
