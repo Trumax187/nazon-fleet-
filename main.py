@@ -225,10 +225,15 @@ def init():
                  "id " + pk + ", name TEXT, kind TEXT, lat REAL, lon REAL, radius_m REAL)")
     conn.execute("""CREATE TABLE IF NOT EXISTS sos (
         plate TEXT PRIMARY KEY, active INTEGER DEFAULT 0, ts TEXT)""")
-    # Audit log — who did what, to what, when.
+        # Audit log — who did what, to what, when.
     conn.execute("CREATE TABLE IF NOT EXISTS audit ("
                  "id " + pk + ", ts TEXT, actor TEXT, action TEXT, "
                  "target TEXT, meta TEXT)")
+    # Incidents — fuel theft, SOS, speeding, etc.
+    conn.execute("CREATE TABLE IF NOT EXISTS incidents ("
+                 "id " + pk + ", plate TEXT, org_id INTEGER, type TEXT, "
+                 "severity TEXT, detected_at TEXT, acknowledged_at TEXT, "
+                 "acknowledged_by TEXT, payload TEXT)")
         # --- batch 2 migration ---
     # Existing databases were created before device_key_hash existed.
     # SQLite's CREATE TABLE IF NOT EXISTS won't add it, so do it explicitly.
@@ -468,6 +473,34 @@ def track(p: Ping):
     if not verify_device_key(p.device_key, v["device_key_hash"]):
         conn.close()
         raise HTTPException(status_code=401, detail="Invalid device key")
+
+    # --- Fuel Theft Detection ---
+    # Get the last known fuel level and speed
+    prev = conn.execute("""
+        SELECT fuel, speed FROM locations WHERE plate=?
+        ORDER BY id DESC LIMIT 1
+    """, (p.plate,)).fetchone()
+
+    if prev is not None:
+        fuel_drop = prev["fuel"] - p.fuel
+        # If fuel dropped by more than 8% and the vehicle is basically stopped
+        if fuel_drop >= 8.0 and p.speed < 5:
+            # Log the incident
+            payload = json.dumps({
+                "previous_fuel": prev["fuel"],
+                "current_fuel": p.fuel,
+                "drop": round(fuel_drop, 1),
+                "speed": p.speed
+            })
+            org_row = conn.execute("SELECT org_id FROM vehicles WHERE plate=?", (p.plate,)).fetchone()
+            org_id = org_row["org_id"] if org_row else 1
+            conn.execute(
+                "INSERT INTO incidents (plate, org_id, type, severity, detected_at, payload) "
+                "VALUES (?, ?, 'fuel_theft', 'high', ?, ?)",
+                (p.plate, org_id, datetime.utcnow().isoformat(), payload)
+            )
+            print(f"*** THEFT DETECTED on {p.plate}: dropped {fuel_drop}% ***")
+
     conn.execute("""INSERT INTO locations (plate, lat, lon, speed, fuel, ts)
                     VALUES (?, ?, ?, ?, ?, ?)""",
                  (p.plate, p.lat, p.lon, p.speed, p.fuel,

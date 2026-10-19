@@ -46,11 +46,20 @@ while True:
         if random.random() < 0.25:
             speed = random.randint(85, 120)
 
-        v["fuel"] -= random.uniform(0.3, 0.8)
-        if random.random() < 0.05:
-            v["fuel"] -= random.uniform(8, 15)
+        # Normal consumption
+        v["fuel"] -= random.uniform(0.1, 0.4)
+        
+        # 2% chance of a massive fuel theft (siphoning while parked)
+        if random.random() < 0.02:
+            print(f"!!! {plate} is being siphoned !!!")
+            speed = 0 # Force speed to 0 so the server detects the theft
+            v["fuel"] -= random.uniform(10.0, 20.0)
+            
+        # If fuel drops below 15, the driver goes to the station to refuel
         if v["fuel"] < 15:
+            print(f"+++ {plate} refueling +++")
             v["fuel"] = 100.0
+            
         v["fuel"] = max(0.0, round(v["fuel"], 1))
 
         try:
