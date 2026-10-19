@@ -784,7 +784,65 @@ def fleet(authorization: str = Header(None)):
     conn.close()
     return {"speed_limit": SPEED_LIMIT, "vehicles": out}
 
+@app.get("/reports/fuel-efficiency")
+def fuel_efficiency(authorization: str = Header(None)):
+    username = require_owner(authorization)
+    conn = db()
+    
+    # Get all vehicles this user/org is allowed to see
+    me = conn.execute("SELECT is_admin, org_id FROM owners WHERE username=?", (username,)).fetchone()
+    is_admin = me is not None and me["is_admin"]
+    org_id = me["org_id"] if me else -1
+    
+    if is_admin:
+        vehicles = conn.execute("SELECT plate FROM vehicles").fetchall()
+    else:
+        vehicles = conn.execute("SELECT plate FROM vehicles WHERE org_id=?", (org_id,)).fetchall()
 
+    report = []
+    TANK_SIZE_L = 60.0 # Assuming a standard 60L tank
+
+    for v in vehicles:
+        plate = v["plate"]
+        rows = conn.execute("""
+            SELECT lat, lon, fuel, ts FROM locations 
+            WHERE plate=? ORDER BY id ASC
+        """, (plate,)).fetchall()
+
+        if len(rows) < 2:
+            continue # Not enough data to calculate
+
+        total_distance_km = 0.0
+        fuel_used_pct = 0.0
+
+        for i in range(1, len(rows)):
+            prev = rows[i-1]
+            curr = rows[i]
+            
+            # Calculate distance
+            dist_m = meters_between(prev["lat"], prev["lon"], curr["lat"], curr["lon"])
+            total_distance_km += dist_m / 1000.0
+
+            # Calculate fuel used (only if it went down, ignore refuels)
+            drop = prev["fuel"] - curr["fuel"]
+            if drop > 0:
+                fuel_used_pct += drop
+
+        # Convert fuel percentage to liters
+        fuel_used_l = (fuel_used_pct / 100.0) * TANK_SIZE_L
+
+        if total_distance_km > 0.1:
+            # L/100km = (Liters Used / Distance) * 100
+            efficiency = round((fuel_used_l / total_distance_km) * 100, 2)
+            report.append({
+                "plate": plate,
+                "distance_km": round(total_distance_km, 2),
+                "fuel_used_l": round(fuel_used_l, 2),
+                "efficiency_l_100km": efficiency
+            })
+
+    conn.close()
+    return {"tank_size_l": TANK_SIZE_L, "report": report}
 @app.get("/trail/{plate}")
 def trail(plate: str, authorization: str = Header(None)):
     username = require_owner(authorization)
@@ -883,6 +941,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="sw" style="background:#e67e22"></span>Simulated congestion
       </div>
       <div id="list"></div>
+      
+      <!-- Fuel Efficiency Panel -->
+      <h2 style="margin-top:20px; border-top:1px solid #dbe0ea; padding-top:15px;">Fuel Efficiency</h2>
+      <div id="fuelReport" style="font-size:12px; color:#555; padding: 0 4px;">
+        Calculating...
+      </div>
     </div>
     <div id="map"></div>
   </div>
@@ -1058,13 +1122,39 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       else clearSos(plate);
     });
 
+    async function loadFuelReport(){
+      try{
+        const res = await authFetch("/reports/fuel-efficiency");
+        if(!res.ok) return;
+        const data = await res.json();
+        const el = document.getElementById("fuelReport");
+        if(!data.report || data.report.length === 0){
+          el.innerHTML = "<em>Not enough data yet. Keep driving.</em>";
+          return;
+        }
+        let html = '<table style="width:100%; text-align:left; border-collapse:collapse;">';
+        html += '<tr style="border-bottom:1px solid #eee;"><th>Plate</th><th>Dist</th><th>L/100km</th></tr>';
+        data.report.forEach(r => {
+          html += `<tr>
+            <td style="padding:4px 0;">${r.plate}</td>
+            <td>${r.distance_km} km</td>
+            <td style="font-weight:bold; color:${r.efficiency_l_100km > 15 ? '#e74c3c' : '#27ae60'}">${r.efficiency_l_100km}</td>
+          </tr>`;
+        });
+        html += '</table>';
+        el.innerHTML = html;
+      }catch(e){ console.log("fuel report error", e); }
+    }
+
     let started = false;
     function startApp(){
       if(started) return;
       started = true;
       loadZones();
       refresh();
+      loadFuelReport();
       refreshTimer = setInterval(refresh, 2000);
+      setInterval(loadFuelReport, 10000); // Update fuel report every 10s
     }
 
     // if a token is already stored, try to use it; otherwise show login
