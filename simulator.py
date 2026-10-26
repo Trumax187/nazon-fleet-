@@ -45,6 +45,10 @@ while True:
         speed = random.randint(30, 70)
         if random.random() < 0.25:
             speed = random.randint(85, 120)
+        
+        # 2% chance the driver stops for a break (triggers trip end after 10s)
+        if random.random() < 0.02:
+            speed = 0
 
         # Normal consumption
         v["fuel"] -= random.uniform(0.1, 0.4)
