@@ -234,6 +234,11 @@ def init():
                  "id " + pk + ", plate TEXT, org_id INTEGER, type TEXT, "
                  "severity TEXT, detected_at TEXT, acknowledged_at TEXT, "
                  "acknowledged_by TEXT, payload TEXT)")
+    # Trips — grouped movements for reporting
+    conn.execute("CREATE TABLE IF NOT EXISTS trips ("
+                 "id " + pk + ", plate TEXT, org_id INTEGER, start_ts TEXT, "
+                 "end_ts TEXT, distance_km REAL, fuel_used_l REAL, "
+                 "avg_speed REAL, max_speed REAL)")
         # --- batch 2 migration ---
     # Existing databases were created before device_key_hash existed.
     # SQLite's CREATE TABLE IF NOT EXISTS won't add it, so do it explicitly.
@@ -457,7 +462,11 @@ def create_account(req: NewAccount, authorization: str = Header(None)):
     conn.close()
     return {"created": req.username, "org_id": org_id, "kind": req.kind}
 
-
+# In-memory tracker for active trips
+# Format: { "plate": {"start_ts": datetime, "distance": float, "fuel_start": float, "max_speed": float, "last_lat": float, "last_lon": float, "stop_count": int} }
+ACTIVE_TRIPS = {}
+STOPPED_PINGS_TO_END = 5  # 5 pings * 2 seconds = 10 seconds of being stopped
+SPEED_THRESHOLD_MOVING = 15.0
 @app.post("/track")
 def track(p: Ping):
     # Per-plate rate limit: 60 pings per minute is 2/sec sustained.
@@ -500,6 +509,66 @@ def track(p: Ping):
                 (p.plate, org_id, datetime.utcnow().isoformat(), payload)
             )
             print(f"*** THEFT DETECTED on {p.plate}: dropped {fuel_drop}% ***")
+
+    # --- Trip Tracking Logic ---
+    now_ts = datetime.utcnow()
+    now_str = now_ts.isoformat()
+    trip = ACTIVE_TRIPS.get(p.plate)
+
+    if trip is None:
+        # If we aren't tracking a trip and the vehicle starts moving, start one!
+        if p.speed >= SPEED_THRESHOLD_MOVING:
+            ACTIVE_TRIPS[p.plate] = {
+                "start_ts": now_ts,
+                "distance": 0.0,
+                "fuel_start": p.fuel,
+                "max_speed": p.speed,
+                "last_lat": p.lat,
+                "last_lon": p.lon,
+                "stop_count": 0
+            }
+            print(f">>> Trip started for {p.plate}")
+    else:
+        # We are already tracking a trip. Update distance and max speed.
+        dist_m = meters_between(trip["last_lat"], trip["last_lon"], p.lat, p.lon)
+        trip["distance"] += (dist_m / 1000.0) # convert to km
+        trip["last_lat"] = p.lat
+        trip["last_lon"] = p.lon
+        if p.speed > trip["max_speed"]:
+            trip["max_speed"] = p.speed
+            
+        # Check if vehicle is stopped
+        if p.speed < 5.0:
+            trip["stop_count"] += 1
+        else:
+            trip["stop_count"] = 0 # Reset if they start moving again
+
+        # If stopped for 5 consecutive pings (10 seconds), end the trip!
+        if trip["stop_count"] >= STOPPED_PINGS_TO_END:
+            # Calculate total fuel used (accounting for the possibility of a refuel mid-trip)
+            fuel_used_pct = 0.0
+            if trip["fuel_start"] > p.fuel:
+                fuel_used_pct = trip["fuel_start"] - p.fuel
+            
+            fuel_used_l = (fuel_used_pct / 100.0) * 60.0 # Assume 60L tank
+            
+            duration_mins = (now_ts - trip["start_ts"]).total_seconds() / 60.0
+            avg_speed = (trip["distance"] / duration_mins) * 60.0 if duration_mins > 0 else 0
+
+            org_row = conn.execute("SELECT org_id FROM vehicles WHERE plate=?", (p.plate,)).fetchone()
+            org_id = org_row["org_id"] if org_row else 1
+
+            conn.execute("""
+                INSERT INTO trips (plate, org_id, start_ts, end_ts, distance_km, fuel_used_l, avg_speed, max_speed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                p.plate, org_id, trip["start_ts"].isoformat(), now_str,
+                round(trip["distance"], 2), round(fuel_used_l, 2),
+                round(avg_speed, 1), round(trip["max_speed"], 1)
+            ))
+            print(f"<<< Trip ended for {p.plate}. Distance: {round(trip['distance'],2)} km")
+            del ACTIVE_TRIPS[p.plate]
+    # --- End Trip Tracking Logic ---
 
     conn.execute("""INSERT INTO locations (plate, lat, lon, speed, fuel, ts)
                     VALUES (?, ?, ?, ?, ?, ?)""",
