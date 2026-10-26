@@ -763,7 +763,32 @@ def sos_trigger(s: SosReq, authorization: str = Header(None)):
     conn.close()
     return {"sos": "active", "plate": s.plate}
 
+class ImmobilizeReq(BaseModel):
+    plate: str
+    confirm: bool = False
 
+@app.post("/vehicles/{plate}/immobilize")
+def immobilize_vehicle(plate: str, req: ImmobilizeReq, authorization: str = Header(None)):
+    username = require_owner(authorization)
+    conn = db()
+    if not owns_vehicle(conn, username, plate):
+        conn.close()
+        raise HTTPException(status_code=403, detail="Not your vehicle")
+        
+    if not req.confirm:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Must set confirm=true to immobilize.")
+        
+    # Log the audit event (CRITICAL for legal reasons)
+    audit(conn, username, "vehicle.immobilize", plate)
+    
+    # When hardware is integrated, this is where you send the MQTT/HTTP command to the device.
+    # For now, we just log it and return success.
+    
+    conn.commit()
+    conn.close()
+    print(f"!!! IMMOBILIZER TRIGGERED FOR {plate} BY {username} !!!")
+    return {"status": "immobilized", "plate": plate, "note": "Hardware integration pending"}
 @app.post("/sos/clear")
 def sos_clear(s: SosReq, authorization: str = Header(None)):
     username = require_owner(authorization)
@@ -1092,7 +1117,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div id="sosbanner" class="sosbanner"></div>
   <div id="wrap">
     <div id="panel">
-      <h2>Vehicles</h2>
+        <h2 data-i18n="vehicles">Vehicles</h2>
     <div id="digestBox" style="background:#fff; border:1px solid #dbe0ea; border-radius:8px; padding:12px; margin-bottom:15px; display:none;">
         <h3 style="margin:0 0 10px 0; font-size:14px; color:#0b3d91;">Weekly Digest</h3>
         <div style="font-size:12px; line-height:1.6;">
@@ -1110,7 +1135,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div id="list"></div>
       
       <!-- Fuel Efficiency Panel -->
-      <h2 style="margin-top:20px; border-top:1px solid #dbe0ea; padding-top:15px;">Fuel Efficiency</h2>
+      <h2 style="margin-top:20px; border-top:1px solid #dbe0ea; padding-top:15px;" data-i18n="fuel_efficiency">Fuel Efficiency</h2>
       <div id="fuelReport" style="font-size:12px; color:#555; padding: 0 4px;">
         Calculating...
       </div>
