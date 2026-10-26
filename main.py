@@ -1,11 +1,41 @@
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 import sqlite3, math, hashlib, hmac, secrets, time, base64, json, os
 from datetime import datetime, timedelta
 
 app = FastAPI(title="NAZON")
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except Exception:
+                pass
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/alerts")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # We don't expect messages from the client, just keep it open
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
 app.add_middleware(
     CORSMiddleware,
@@ -509,6 +539,13 @@ def track(p: Ping):
                 (p.plate, org_id, datetime.utcnow().isoformat(), payload)
             )
             print(f"*** THEFT DETECTED on {p.plate}: dropped {fuel_drop}% ***")
+            # Broadcast to WebSockets
+            import asyncio
+            asyncio.create_task(manager.broadcast(json.dumps({
+                "type": "theft",
+                "plate": p.plate,
+                "drop": round(fuel_drop, 1)
+            })))
 
     # --- Trip Tracking Logic ---
     now_ts = datetime.utcnow()
@@ -1289,6 +1326,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }catch(e){ console.log("fuel report error", e); }
     }
 
+    // --- WebSocket Alerts ---
+    let ws;
+    function connectWebSocket(){
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(proto + "//" + location.host + "/ws/alerts");
+      
+      ws.onmessage = function(event){
+        const data = JSON.parse(event.data);
+        if(data.type === "theft"){
+          // Play a quick beep (requires user to have interacted with page first)
+          try {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const osc = ctx.createOscillator();
+            osc.type = "sine";
+            osc.frequency.setValueAtTime(880, ctx.currentTime);
+            osc.connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.3);
+          } catch(e){}
+          
+          // Flash the title
+          let isFlashing = false;
+          const flashInterval = setInterval(() => {
+            document.title = isFlashing ? "THEFT ALERT - NAZON" : "Live Fleet Tracking";
+            isFlashing = !isFlashing;
+          }, 500);
+          
+          // Stop flashing after 10 seconds
+          setTimeout(() => {
+            clearInterval(flashInterval);
+            document.title = "NAZON Fleet Tracking";
+          }, 10000);
+
+          // Update the UI immediately
+          refresh();
+        }
+      };
+      
+      ws.onclose = function(){
+        console.log("WebSocket closed. Reconnecting in 5s...");
+        setTimeout(connectWebSocket, 5000);
+      };
+    }
+
     let started = false;
     function startApp(){
       if(started) return;
@@ -1297,6 +1378,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       refresh();
       loadDigest();
       loadFuelReport();
+      connectWebSocket(); // <--- Start the WebSocket
       refreshTimer = setInterval(refresh, 2000);
       setInterval(loadFuelReport, 10000); 
     }
