@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import sqlite3, math, hashlib, hmac, secrets, time, base64, json, os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = FastAPI(title="NAZON")
 
@@ -852,7 +852,58 @@ def fleet(authorization: str = Header(None)):
         })
     conn.close()
     return {"speed_limit": SPEED_LIMIT, "vehicles": out}
+@app.get("/reports/digest")
+def weekly_digest(authorization: str = Header(None)):
+    username = require_owner(authorization)
+    conn = db()
+    
+    # Get user's org
+    me = conn.execute("SELECT is_admin, org_id FROM owners WHERE username=?", (username,)).fetchone()
+    is_admin = me is not None and me["is_admin"]
+    org_id = me["org_id"] if me else -1
+    
+    # We'll report on the last 7 days
+    # (In a real app, this would take start_date and end_date query params)
+    seven_days_ago = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    
+    # Query trips
+    if is_admin:
+        trips = conn.execute(
+            "SELECT * FROM trips WHERE start_ts > ?", (seven_days_ago,)
+        ).fetchall()
+    else:
+        trips = conn.execute(
+            "SELECT * FROM trips WHERE org_id=? AND start_ts > ?", (org_id, seven_days_ago)
+        ).fetchall()
+        
+    # Query theft incidents
+    if is_admin:
+        thefts = conn.execute(
+            "SELECT * FROM incidents WHERE type='fuel_theft' AND detected_at > ?", (seven_days_ago,)
+        ).fetchall()
+    else:
+        thefts = conn.execute(
+            "SELECT * FROM incidents WHERE org_id=? AND type='fuel_theft' AND detected_at > ?", (org_id, seven_days_ago)
+        ).fetchall()
 
+    total_distance = sum(t["distance_km"] for t in trips)
+    total_fuel = sum(t["fuel_used_l"] for t in trips)
+    
+    # Estimate cost (e.g., 30 ZMW per liter)
+    FUEL_PRICE_PER_LITER = 30.0
+    total_cost = total_fuel * FUEL_PRICE_PER_LITER
+    
+    conn.close()
+    
+    return {
+        "period": "Last 7 days",
+        "total_trips": len(trips),
+        "total_distance_km": round(total_distance, 1),
+        "total_fuel_used_l": round(total_fuel, 1),
+        "estimated_cost_zmw": round(total_cost, 2),
+        "fuel_theft_incidents": len(thefts),
+        "fuel_price_assumed": FUEL_PRICE_PER_LITER
+    }
 @app.get("/reports/fuel-efficiency")
 def fuel_efficiency(authorization: str = Header(None)):
     username = require_owner(authorization)
@@ -1005,6 +1056,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div id="wrap">
     <div id="panel">
       <h2>Vehicles</h2>
+    <div id="digestBox" style="background:#fff; border:1px solid #dbe0ea; border-radius:8px; padding:12px; margin-bottom:15px; display:none;">
+        <h3 style="margin:0 0 10px 0; font-size:14px; color:#0b3d91;">Weekly Digest</h3>
+        <div style="font-size:12px; line-height:1.6;">
+          Trips: <b id="dgTrips">0</b><br>
+          Distance: <b id="dgDist">0</b> km<br>
+          Fuel: <b id="dgFuel">0</b> L<br>
+          Cost: <b id="dgCost" style="color:#e74c3c;">0</b> ZMW<br>
+          Theft Alerts: <b id="dgTheft" style="color:#e74c3c;">0</b>
+        </div>
+      </div>
       <div class="legend">
         <span class="sw" style="background:#e74c3c"></span>Danger zone &nbsp;
         <span class="sw" style="background:#e67e22"></span>Simulated congestion
@@ -1191,6 +1252,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       else clearSos(plate);
     });
 
+    async function loadDigest(){
+      try{
+        const res = await authFetch("/reports/digest");
+        if(!res.ok) return;
+        const d = await res.json();
+        document.getElementById("dgTrips").textContent = d.total_trips;
+        document.getElementById("dgDist").textContent = d.total_distance_km;
+        document.getElementById("dgFuel").textContent = d.total_fuel_used_l;
+        document.getElementById("dgCost").textContent = d.estimated_cost_zmw.toLocaleString();
+        document.getElementById("dgTheft").textContent = d.fuel_theft_incidents;
+        document.getElementById("digestBox").style.display = "block";
+      }catch(e){ console.log("digest error", e); }
+    }
     async function loadFuelReport(){
       try{
         const res = await authFetch("/reports/fuel-efficiency");
@@ -1221,9 +1295,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       started = true;
       loadZones();
       refresh();
+      loadDigest();
       loadFuelReport();
       refreshTimer = setInterval(refresh, 2000);
-      setInterval(loadFuelReport, 10000); // Update fuel report every 10s
+      setInterval(loadFuelReport, 10000); 
     }
 
     // if a token is already stored, try to use it; otherwise show login
